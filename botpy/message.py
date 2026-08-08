@@ -198,6 +198,7 @@ class BaseMessage:
         "msg_seq",
         "timestamp",
         "event_id",
+        "message_scene"
     )
 
     def __init__(self, api: BotAPI, event_id, data: gateway.MessagePayload):
@@ -210,6 +211,7 @@ class BaseMessage:
         self.msg_seq = data.get("msg_seq", None)  # 全局消息序号
         self.timestamp = data.get("timestamp", None)
         self.event_id = event_id
+        self.message_scene = data.get("message_scene", None)
 
     def __repr__(self):
         return str({items: str(getattr(self, items)) for items in self.__slots__ if not items.startswith("_")})
