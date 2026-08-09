@@ -184,8 +184,9 @@ class Client:
             raise Exception("[botpy] 超出会话限制...")
 
         # 根据session限制建立链接
-        concurrency = self._ws_ap["session_start_limit"]["max_concurrency"]
-        session_interval = round(5 / concurrency)
+        # max_concurrency 表示每个 5 秒窗口内可同时启动的会话数。
+        # ConnectionSession 会按该并发数分批，因此批次之间固定等待 5 秒。
+        session_interval = 5
 
         # 根据限制建立分片的并发链接数
         _log.debug(f'[botpy] 会话间隔: {session_interval}, 分片: {self._ws_ap["shards"]}, 事件代码: {self.intents}')
@@ -203,7 +204,7 @@ class Client:
         for i in range(self._ws_ap["shards"]):
             session = {
                 "session_id": "",
-                "last_seq": 0,
+                "last_seq": None,
                 "intent": self.intents,
                 "token": token,
                 "url": self._ws_ap["url"],

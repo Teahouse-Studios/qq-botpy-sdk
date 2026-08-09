@@ -48,28 +48,43 @@ class ConnectionSession:
     async def multi_run(self, session_interval=5):
         if len(self._session_list) == 0:
             return
-        # 根据并发数同时建立多个future
-        index = 0
-        session_list = self._session_list
-        # 需要执行的链接列表，通过time_interval控制启动时间
-        tasks = []
+        max_async = max(1, self._max_async)
+        running = set()
 
-        while len(session_list) > 0:
-            _log.debug("[botpy] 会话列表循环运行")
-            time_interval = session_interval * (index + 1)
-            _log.info("[botpy] 最大并发连接数: %s, 启动会话数: %s" % (self._max_async, len(session_list)))
-            for i in range(self._max_async):
-                if len(session_list) == 0:
-                    break
-                tasks.append(asyncio.ensure_future(self._runner(session_list.pop(i), time_interval), loop=self.loop))
-            index += self._max_async
+        # 连接任务通常会长期运行。使用 FIRST_COMPLETED 才能在某个分片断开时，
+        # 立即消费 on_closed 放回队列的 session，而不是等待其他所有分片也断开。
+        while self._session_list or running:
+            while self._session_list:
+                batch = []
+                for _ in range(min(max_async, len(self._session_list))):
+                    batch.append(self._session_list.pop(0))
 
-        await asyncio.wait(tasks)
+                _log.info("[botpy] 最大并发连接数: %s, 启动会话数: %s" % (max_async, len(batch)))
+                for current_session in batch:
+                    running.add(
+                        asyncio.ensure_future(self._runner(current_session), loop=self.loop)
+                    )
 
-    async def _runner(self, session, time_interval):
+                # 网关限制的是单位时间内的启动次数，不是同时保持的连接数。
+                if self._session_list and session_interval > 0:
+                    await asyncio.sleep(session_interval)
+
+            if not running:
+                continue
+
+            done, running = await asyncio.wait(
+                running,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                # 读取结果，避免任务异常被静默丢弃。
+                task.result()
+
+            if self._session_list and session_interval > 0:
+                await asyncio.sleep(session_interval)
+
+    async def _runner(self, session):
         await self._connect(session)
-        # 后台有频率限制，根据间隔时间发起链接请求
-        await asyncio.sleep(time_interval)
 
     def add(self, _session: session.Session):
         self._session_list.append(_session)

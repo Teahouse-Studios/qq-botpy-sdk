@@ -23,7 +23,7 @@ HTTP_OK_STATUS = [200, 202, 204]
 class _FormData(FormData):
     def _gen_form_data(self) -> multipart.MultipartWriter:
         """Encode a list of fields using the multipart/form-data MIME format"""
-        if self._is_processed:
+        if getattr(self, "_is_processed", False):
             return self._writer  # rewrite this part of FormData object to enable retry of request
         for dispparams, headers, value in self._fields:
             try:

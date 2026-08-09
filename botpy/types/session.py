@@ -1,4 +1,4 @@
-from typing import TypedDict
+from typing import Optional, TypedDict
 
 from ..robot import Token
 
@@ -10,7 +10,7 @@ class ShardConfig(TypedDict):
 
 class Session(TypedDict):
     session_id: str
-    last_seq: int
+    last_seq: Optional[int]
     intent: int
     token: Token
     url: str
