@@ -1,17 +1,38 @@
-[tool.poetry]
-name = "botpy"
+[project]
+name = "qq-botpy"
 version = "0.1.0"
-description = ""
-authors = ["yzhh <31803608+OasisAkari@users.noreply.github.com>"]
+description = "Async Python SDK for the QQ Bot Open Platform"
+authors = [{ name = "Tencent", email = "veehou@tencent.com" }]
 readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<4.0"
+dependencies = [
+    "aiohttp>=3.14.3,<4",
+    "APScheduler>=3.11.3,<4",
+    "cryptography>=50.0.0,<51",
+    "PyYAML>=6.0.3,<7",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 
-[tool.poetry.dependencies]
-python = "^3.12"
-pre-commit = "^4.0.1"
-pyyaml = "^6.0.2"
-aiohttp = "^3.10.10"
-apscheduler = "^3.10.4"
+[project.urls]
+Homepage = "https://github.com/tencent-connect/botpy"
+Repository = "https://github.com/tencent-connect/botpy"
 
+[tool.poetry]
+packages = [{ include = "botpy" }]
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = { version = "^4.6.1", python = ">=3.10" }
 
 [build-system]
 requires = ["poetry-core"]

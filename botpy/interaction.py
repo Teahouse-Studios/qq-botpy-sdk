@@ -43,6 +43,13 @@ class Interaction:
     def __repr__(self):
         return str({items: str(getattr(self, items)) for items in self.__slots__ if not items.startswith("_")})
 
+    async def acknowledge(self, code: int = 0, data=None):
+        """向平台确认本次交互处理结果。"""
+
+        if not self.id:
+            raise ValueError("interaction id is required")
+        return await self._api.on_interaction_result(self.id, code, data)
+
     class _Data:
         def __init__(self, data):
             self.type = data.get("type", None)

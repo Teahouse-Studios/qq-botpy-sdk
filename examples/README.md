@@ -21,6 +21,7 @@ examples/
 ├── demo_get_reaction_users.py   # 机器人获取表情表态成员列表示例
 ├── demo_guild_member_event.py   # 机器人频道成员变化事件示例
 ├── demo_interaction.py          # 机器人互动事件示例（未启用）
+├── demo_modern_client.py        # 新协议层、缓存、限流、Interaction 与 Session 组合示例
 ├── demo_pins_message.py         # 机器人消息置顶示例
 ├── demo_recall.py               # 机器人消息撤回示例
 ├── demo_schedule.py             # 机器人日程相关示例

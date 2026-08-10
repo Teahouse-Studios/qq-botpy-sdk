@@ -43,7 +43,7 @@ class ConnectionSession:
         self._max_async = max_async
         self.loop: asyncio.AbstractEventLoop = asyncio.get_event_loop() if loop is None else loop
         # session链接同时最大并发数
-        self._session_list: List[session.Session] = []
+        self._session_list: List[tuple[session.Session, bool]] = []
 
     async def multi_run(self, session_interval=5):
         if len(self._session_list) == 0:
@@ -60,7 +60,7 @@ class ConnectionSession:
                     batch.append(self._session_list.pop(0))
 
                 _log.info("[botpy] 最大并发连接数: %s, 启动会话数: %s" % (max_async, len(batch)))
-                for current_session in batch:
+                for current_session, _is_reconnect in batch:
                     running.add(
                         asyncio.ensure_future(self._runner(current_session), loop=self.loop)
                     )
@@ -80,14 +80,15 @@ class ConnectionSession:
                 # 读取结果，避免任务异常被静默丢弃。
                 task.result()
 
-            if self._session_list and session_interval > 0:
+            has_initial_session = any(not is_reconnect for _session, is_reconnect in self._session_list)
+            if self._session_list and has_initial_session and session_interval > 0:
                 await asyncio.sleep(session_interval)
 
     async def _runner(self, session):
         await self._connect(session)
 
-    def add(self, _session: session.Session):
-        self._session_list.append(_session)
+    def add(self, _session: session.Session, *, is_reconnect: bool = False):
+        self._session_list.append((_session, is_reconnect))
 
 
 class ConnectionState:

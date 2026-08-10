@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import json
-import traceback
 from typing import Optional
 
 from aiohttp import WSMessage, ClientWebSocketResponse, TCPConnector, ClientSession, WSMsgType
-from ssl import SSLContext
 
 from . import logging
 from .connection import ConnectionSession
+from .protocol.events import parse_gateway_event
+from .protocol.reconnect import CloseAction, ReconnectPolicy
+from .protocol.models import SessionState
+from .protocol.session import SessionStore
+from .protocol.transport import EventHandler
 from .types import gateway
 from .types.session import Session
 
@@ -49,35 +52,75 @@ class BotWebSocket:
         self._heartbeat_interval = self.DEFAULT_HEARTBEAT_INTERVAL
         self._heartbeat_acknowledged = True
         self._heartbeat_task: Optional[asyncio.Task] = None
-        self._INVALID_RECONNECT_CODE = [9001, 9005]
-        self._AUTH_FAIL_CODE = [4004]
+        self._event_handler: Optional[EventHandler] = None
+        self._closing = False
+        self._sleep = asyncio.sleep
+        self._reconnect_wait_task: Optional[asyncio.Task] = None
+        reconnect_policy = self._session.get("reconnect_policy")
+        if not isinstance(reconnect_policy, ReconnectPolicy):
+            reconnect_policy = ReconnectPolicy()
+            self._session["reconnect_policy"] = reconnect_policy
+        self._reconnect_policy = reconnect_policy
 
     async def on_error(self, exception: BaseException):
+        if self._closing:
+            return
         _log.error("[botpy] websocket连接: %s, 异常信息 : %s" % (self._conn, exception))
-        traceback.print_exc()
         self._stop_heartbeat()
-        self._queue_reconnect()
+        if self._conn is None or self._conn.closed:
+            await self._queue_reconnect()
 
     async def on_closed(self, close_status_code, close_msg):
         _log.info("[botpy] 关闭, 返回码: %s" % close_status_code + ", 返回信息: %s" % close_msg)
         self._stop_heartbeat()
-        if close_status_code in self._AUTH_FAIL_CODE:
-            _log.info("[botpy] 鉴权失败，重置token...")
-            self._session["token"].access_token = None
-        # 这种不能重新链接
-        if close_status_code in self._INVALID_RECONNECT_CODE or not self._can_reconnect:
-            _log.info("[botpy] 无法重连，创建新连接!")
-            self._session["session_id"] = ""
-            self._session["last_seq"] = None
-        # 断连后启动一个新的链接并透传当前的session，不使用内部重连的方式，避免死循环
-        self._queue_reconnect()
-
-    def _queue_reconnect(self):
-        """确保同一个 websocket 实例只被放回重连队列一次。"""
+        if self._closing:
+            return
         if self._reconnect_queued:
             return
+
+        action = self._reconnect_policy.handle_close(close_status_code)
+        if not self._can_reconnect:
+            action = CloseAction(
+                should_reconnect=True,
+                clear_session=True,
+                refresh_token=True,
+                reason="resume is not allowed",
+            )
+
+        if action.refresh_token:
+            _log.info("[botpy] Gateway 要求刷新 token: %s", action.reason)
+            self._session["token"].access_token = None
+        if action.clear_session:
+            _log.info("[botpy] Gateway Session 已清理: %s", action.reason)
+            self._session["session_id"] = ""
+            self._session["last_seq"] = None
+            await self._clear_persisted_session()
+        if action.fatal:
+            _log.error("[botpy] Gateway 致命关闭，不再重连: %s", action.reason)
+            return
+        if action.should_reconnect:
+            await self._queue_reconnect(action.reconnect_delay)
+
+    async def _queue_reconnect(self, custom_delay: Optional[float] = None):
+        """确保同一个 websocket 实例只被放回重连队列一次。"""
+        if self._closing or self._reconnect_queued:
+            return
         self._reconnect_queued = True
-        self._connection.add(self._session)
+        delay = self._reconnect_policy.next_delay(custom_delay)
+        if delay is None:
+            _log.error("[botpy] Gateway 重连次数已耗尽")
+            return
+        _log.info("[botpy] %.1f 秒后进行第 %s 次 Gateway 重连", delay, self._reconnect_policy.attempts)
+        if delay > 0:
+            self._reconnect_wait_task = asyncio.create_task(self._sleep(delay))
+            try:
+                await self._reconnect_wait_task
+            except asyncio.CancelledError:
+                return
+            finally:
+                self._reconnect_wait_task = None
+        if not self._closing:
+            self._connection.add(self._session, is_reconnect=True)
 
     def _stop_heartbeat(self):
         task = self._heartbeat_task
@@ -92,9 +135,28 @@ class BotWebSocket:
             await self._conn.close(code=4000, message=reason.encode("utf-8")[:123])
         await self.on_closed(4000, reason)
 
+    async def start(self, handler: EventHandler) -> None:
+        """作为 EventTransport 启动，同时保留旧事件解析分发。"""
+        self._event_handler = handler
+        self._closing = False
+        await self.ws_connect()
+
+    async def close(self) -> None:
+        """停止当前传输且不进入重连队列。"""
+        self._closing = True
+        self._can_reconnect = False
+        self._stop_heartbeat()
+        reconnect_wait_task = self._reconnect_wait_task
+        if reconnect_wait_task and reconnect_wait_task is not asyncio.current_task():
+            reconnect_wait_task.cancel()
+        if self._conn is not None and not self._conn.closed:
+            await self._conn.close(code=1000, message=b"client closing")
+
     async def on_message(self, ws, message):
         _log.debug("[botpy] 接收消息: %s" % message)
         msg = json.loads(message)
+        if not isinstance(msg, dict):
+            raise ValueError("gateway payload must be an object")
 
         if await self._is_system_event(msg, ws):
             return
@@ -112,23 +174,34 @@ class BotWebSocket:
             self._start_heartbeat()
             _log.info("[botpy] 机器人重连成功! ")
 
-        if event and opcode == self.WS_DISPATCH_EVENT:
-            event = msg["t"].lower()
-            try:
-                func = self._parser[event]
-            except KeyError:
-                _log.error("_parser unknown event %s.", event)
+        if opcode == self.WS_DISPATCH_EVENT:
+            if event:
+                parser_name = event.lower()
+                try:
+                    func = self._parser[parser_name]
+                except KeyError:
+                    if self._event_handler is None:
+                        _log.warning("[botpy] 未识别 Gateway 事件: %s", parser_name)
+                    else:
+                        _log.debug("[botpy] Gateway 事件由 raw handler 接管: %s", parser_name)
+                else:
+                    func(msg)
             else:
-                func(msg)
+                _log.warning("[botpy] Gateway Dispatch 缺少事件类型 t")
+
+            if self._event_handler is not None:
+                await self._event_handler(parse_gateway_event(msg))
 
         # 在网关事件完成解析和分发后再记录序列号，避免 Resume 跳过处理失败的事件。
-        if isinstance(event_seq, int) and event_seq >= 0:
+        if isinstance(event_seq, int) and not isinstance(event_seq, bool) and event_seq >= 0:
             self._session["last_seq"] = event_seq
+            await self._persist_session()
 
     async def on_connected(self, ws: ClientWebSocketResponse):
         self._conn = ws
         if self._conn is None:
             raise Exception("[botpy] websocket连接失败")
+        self._reconnect_policy.on_connected()
         if self._session["session_id"]:
             await self.ws_resume()
         else:
@@ -144,8 +217,7 @@ class BotWebSocket:
         if not ws_url:
             raise Exception("[botpy] 会话url为空")
 
-        # adding SSLContext-containing connector to prevent SSL certificate verify failed error
-        async with ClientSession(connector=TCPConnector(limit=10, ssl=SSLContext())) as session:
+        async with ClientSession(connector=TCPConnector(limit=10)) as session:
             async with session.ws_connect(self._session["url"]) as ws_conn:
                 while True:
                     msg: WSMessage
@@ -153,8 +225,10 @@ class BotWebSocket:
                     if msg.type == WSMsgType.TEXT:
                         await self.on_message(ws_conn, msg.data)
                     elif msg.type == WSMsgType.ERROR:
-                        await self.on_error(ws_conn.exception())
+                        exception = ws_conn.exception() or RuntimeError("websocket transport error")
+                        await self.on_error(exception)
                         await ws_conn.close()
+                        await self.on_closed(ws_conn.close_code, str(exception))
                     elif msg.type == WSMsgType.CLOSED or msg.type == WSMsgType.CLOSE:
                         await self.on_closed(ws_conn.close_code, msg.extra)
                     if ws_conn.closed:
@@ -216,10 +290,46 @@ class BotWebSocket:
         data = message_event["d"]
         self.version = data["version"]
         self._session["session_id"] = data["session_id"]
-        self._session["shards"]["shard_id"] = data["shard"][0]
-        self._session["shards"]["shard_count"] = data["shard"][1]
+        shard = data.get("shard")
+        if isinstance(shard, (list, tuple)) and len(shard) == 2:
+            if isinstance(shard[0], int) and shard[0] >= 0:
+                self._session["shards"]["shard_id"] = shard[0]
+            if isinstance(shard[1], int) and shard[1] > 0:
+                self._session["shards"]["shard_count"] = shard[1]
         self.user = data["user"]
         return data
+
+    async def _persist_session(self) -> None:
+        store = self._session.get("session_store")
+        session_id = self._session.get("session_id")
+        sequence = self._session.get("last_seq")
+        if not isinstance(store, SessionStore) or not session_id or sequence is None:
+            return
+        shard = self._session["shards"]
+        try:
+            await store.save(
+                self._session["token"].app_id,
+                SessionState(
+                    session_id=session_id,
+                    sequence=sequence,
+                    shard_id=shard["shard_id"],
+                    shard_count=shard["shard_count"],
+                ),
+            )
+        except Exception as exc:
+            _log.warning("[botpy] 保存 Gateway Session 失败: %s", exc)
+
+    async def _clear_persisted_session(self) -> None:
+        store = self._session.get("session_store")
+        if not isinstance(store, SessionStore):
+            return
+        try:
+            await store.clear(
+                self._session["token"].app_id,
+                self._session["shards"]["shard_id"],
+            )
+        except Exception as exc:
+            _log.warning("[botpy] 清理 Gateway Session 失败: %s", exc)
 
     async def _is_system_event(self, message_event, ws):
         """
@@ -252,8 +362,12 @@ class BotWebSocket:
             await self._close_for_reconnect("server requested reconnect", can_resume=True)
             return True
         if event_op == self.WS_INVALID_SESSION:
-            _log.warning("[botpy] Session 已失效，准备重新鉴权...")
-            await self._close_for_reconnect("invalid session", can_resume=False)
+            can_resume = message_event.get("d") is True
+            if can_resume:
+                _log.warning("[botpy] Session 暂时无效，准备 Resume...")
+            else:
+                _log.warning("[botpy] Session 已失效，准备重新鉴权...")
+            await self._close_for_reconnect("invalid session", can_resume=can_resume)
             return True
         return False
 

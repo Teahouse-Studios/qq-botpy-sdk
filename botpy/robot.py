@@ -1,10 +1,6 @@
-import asyncio
-import time
-
-import aiohttp
-
 from .logging import get_logger
 from botpy.types import robot
+from .protocol.auth import TokenManager
 
 _log = get_logger()
 
@@ -23,7 +19,16 @@ class Token:
     TYPE_BOT = "QQBot"
     TYPE_NORMAL = "Bearer"
 
-    def __init__(self, app_id: str, secret: str):
+    def __init__(
+        self,
+        app_id: str,
+        secret: str,
+        *,
+        base_url: str = "https://bots.qq.com",
+        timeout: float = 20,
+        user_agent: str = "qq-botpy",
+        ssl=None,
+    ):
         """
         :param app_id:
             机器人appid
@@ -32,39 +37,53 @@ class Token:
         """
         self.app_id = app_id
         self.secret = secret
-        self.access_token = None
-        self.expires_in = 0
         self.Type = self.TYPE_BOT
+        self._manager = TokenManager(
+            app_id,
+            secret,
+            base_url=base_url,
+            timeout=timeout,
+            user_agent=user_agent,
+            ssl=ssl,
+            logger=_log,
+        )
+
+    @property
+    def access_token(self):
+        return self._manager.cached_token
+
+    @access_token.setter
+    def access_token(self, value):
+        if value is None:
+            self._manager.clear()
+        else:
+            self._manager.set_cached_token(value, self._manager.expires_at)
+
+    @property
+    def expires_in(self):
+        return int(self._manager.expires_at)
+
+    @expires_in.setter
+    def expires_in(self, value):
+        self._manager.set_cached_token(self.access_token, float(value))
 
     async def check_token(self):
-        if self.access_token is None or int(time.time()) >= self.expires_in:
-            await self.update_access_token()
+        await self._manager.get_access_token()
 
     async def update_access_token(self):
-        session = aiohttp.ClientSession()
-        data = None
-        # TODO 增加超时重试
-        try:
-            async with session.post(
-                url="https://bots.qq.com/app/getAppAccessToken",
-                timeout=(aiohttp.ClientTimeout(total=20)),
-                json={
-                    "appId": self.app_id,
-                    "clientSecret": self.secret,
-                },
-            ) as response:
-                data = await response.json()
-        except asyncio.TimeoutError as e:
-            _log.info("[botpy] access_token TimeoutError:" + str(e))
-            raise
-        finally:
-            await session.close()
-        if "access_token" not in data or "expires_in" not in data:
-            _log.error("[botpy] 获取token失败，请检查appid和secret填写是否正确！")
-            raise RuntimeError(str(data))
-        _log.info("[botpy] access_token expires_in " + data["expires_in"])
-        self.access_token = data["access_token"]
-        self.expires_in = int(data["expires_in"]) + int(time.time())
+        await self._manager.get_access_token(force_refresh=True)
+
+    async def get_access_token(self, force_refresh: bool = False) -> str:
+        return await self._manager.get_access_token(force_refresh=force_refresh)
+
+    async def close(self):
+        await self._manager.close()
+
+    def start_background_refresh(self):
+        return self._manager.start_background_refresh()
+
+    async def stop_background_refresh(self):
+        await self._manager.stop_background_refresh()
 
     # BotToken 机器人身份的 token
     def bot_token(self):

@@ -3,7 +3,7 @@
 # 异步api
 
 from io import BufferedReader
-from typing import Any, List, Union, BinaryIO, Dict
+from typing import Any, List, Union, BinaryIO, Dict, Mapping, Optional
 
 from .flags import Permission
 from .http import BotHttp, Route
@@ -39,6 +39,49 @@ class BotAPI:
           http (BotHttp): 用于发送请求的 http 客户端。
         """
         self._http = http
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        json: Any = None,
+        retry_unsafe: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """调用尚未被 SDK 封装的 QQ 开放平台 REST API。"""
+
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError("path must start with '/'")
+        route = Route(method.upper(), path)
+        return await self._http.request(
+            route,
+            params=params,
+            json=json,
+            retry_unsafe=retry_unsafe,
+            timeout=timeout,
+        )
+
+    async def get(self, path: str, *, params: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> Any:
+        return await self.request("GET", path, params=params, **kwargs)
+
+    async def post(self, path: str, json: Any = None, **kwargs: Any) -> Any:
+        return await self.request("POST", path, json=json, **kwargs)
+
+    async def put(self, path: str, json: Any = None, **kwargs: Any) -> Any:
+        return await self.request("PUT", path, json=json, **kwargs)
+
+    async def patch(self, path: str, json: Any = None, **kwargs: Any) -> Any:
+        return await self.request("PATCH", path, json=json, **kwargs)
+
+    async def delete(self, path: str, **kwargs: Any) -> Any:
+        return await self.request("DELETE", path, **kwargs)
+
+    async def get_token(self, force_refresh: bool = False) -> str:
+        """返回当前有效的 access token，供高级集成使用。"""
+
+        return await self._http.get_access_token(force_refresh=force_refresh)
 
     # 频道相关接口
     async def get_guild(self, guild_id: str) -> guild.GuildPayload:
@@ -507,6 +550,7 @@ class BotAPI:
         event_id: str = None,
         markdown: message.MarkdownPayload = None,
         keyboard: message.Keyboard = None,
+        **extra,
     ) -> message.Message:
         """
         发送消息。
@@ -539,9 +583,20 @@ class BotAPI:
         elif isinstance(file_image, str):
             with open(file_image, "rb") as img:
                 file_image = img.read()
-        payload = locals()
-        payload.pop("self", None)
-        payload.pop("img", None)
+        payload = {
+            "content": content,
+            "embed": embed,
+            "ark": ark,
+            "message_reference": message_reference,
+            "image": image,
+            "file_image": file_image,
+            "msg_id": msg_id,
+            "event_id": event_id,
+            "markdown": markdown,
+            "keyboard": keyboard,
+        }
+        payload.update(extra)
+        payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/channels/{channel_id}/messages", channel_id=channel_id)
         return await self._http.request(route, json=payload)
 
@@ -589,6 +644,17 @@ class BotAPI:
         )
         return await self._http.request(route)
 
+    async def recall_c2c_message(self, openid: str, message_id: str) -> str:
+        """撤回机器人发送给 C2C 用户的消息。"""
+
+        route = Route(
+            "DELETE",
+            "/v2/users/{openid}/messages/{message_id}",
+            openid=openid,
+            message_id=message_id,
+        )
+        return await self._http.request(route)
+
     async def post_keyboard_message(
         self,
         channel_id: str,
@@ -614,7 +680,12 @@ class BotAPI:
         )
         return await self._http.request(route, json=payload)
 
-    async def on_interaction_result(self, interaction_id: str, code: int):
+    async def on_interaction_result(
+        self,
+        interaction_id: str,
+        code: int = 0,
+        data: Optional[Mapping[str, Any]] = None,
+    ):
         """
         `on_interaction_result` 消息按钮回调结果
 
@@ -626,6 +697,8 @@ class BotAPI:
           无
         """
         payload = {"code": code}
+        if data is not None:
+            payload["data"] = dict(data)
         route = Route(
             "PUT",
             "/interactions/{id}",
@@ -697,6 +770,7 @@ class BotAPI:
         event_id: str = None,
         markdown: message.MarkdownPayload = None,
         keyboard: message.Keyboard = None,
+        **extra,
     ) -> message.Message:
         """
         发送私信。
@@ -729,9 +803,20 @@ class BotAPI:
         elif isinstance(file_image, str):
             with open(file_image, "rb") as img:
                 file_image = img.read()
-        payload = locals()
-        payload.pop("self", None)
-        payload.pop("img", None)
+        payload = {
+            "content": content,
+            "embed": embed,
+            "ark": ark,
+            "message_reference": message_reference,
+            "image": image,
+            "file_image": file_image,
+            "msg_id": msg_id,
+            "event_id": event_id,
+            "markdown": markdown,
+            "keyboard": keyboard,
+        }
+        payload.update(extra)
+        payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/dms/{guild_id}/messages", guild_id=guild_id)
         return await self._http.request(route, json=payload)
 
@@ -1409,6 +1494,7 @@ class BotAPI:
         event_id: str = None,
         markdown: message.MarkdownPayload = None,
         keyboard: message.KeyboardPayload = None,
+        **extra,
     ) -> message.Message:
         """
         发送消息。
@@ -1436,8 +1522,21 @@ class BotAPI:
         Returns:
           message.Message: 一个消息字典对象。
         """
-        payload = locals()
-        payload.pop("self", None)
+        payload = {
+            "msg_type": msg_type,
+            "content": content,
+            "embed": embed,
+            "ark": ark,
+            "message_reference": message_reference,
+            "media": media,
+            "msg_id": msg_id,
+            "msg_seq": msg_seq,
+            "event_id": event_id,
+            "markdown": markdown,
+            "keyboard": keyboard,
+        }
+        payload.update(extra)
+        payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/groups/{group_openid}/messages", group_openid=group_openid)
         return await self._http.request(route, json=payload)
 
@@ -1455,6 +1554,7 @@ class BotAPI:
         event_id: str = None,
         markdown: message.MarkdownPayload = None,
         keyboard: message.KeyboardPayload = None,
+        **extra,
     ) -> message.Message:
         """
         发送消息。
@@ -1482,10 +1582,158 @@ class BotAPI:
         Returns:
           message.Message: 一个消息字典对象。
         """
-        payload = locals()
-        payload.pop("self", None)
+        payload = {
+            "msg_type": msg_type,
+            "content": content,
+            "embed": embed,
+            "ark": ark,
+            "message_reference": message_reference,
+            "media": media,
+            "msg_id": msg_id,
+            "msg_seq": msg_seq,
+            "event_id": event_id,
+            "markdown": markdown,
+            "keyboard": keyboard,
+        }
+        payload.update(extra)
+        payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
         return await self._http.request(route, json=payload)
+
+    async def post_c2c_typing(
+        self,
+        openid: str,
+        input_second: int = 60,
+        msg_id: str = None,
+        msg_seq: int = 1,
+    ) -> message.Message:
+        """向 C2C 用户发送输入状态通知。"""
+
+        payload = {
+            "msg_type": 6,
+            "input_notify": {"input_type": 1, "input_second": input_second},
+            "msg_seq": msg_seq,
+        }
+        if msg_id:
+            payload["msg_id"] = msg_id
+        route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
+        return await self._http.request(route, json=payload)
+
+    async def post_c2c_stream_message(
+        self,
+        openid: str,
+        *,
+        input_mode: str,
+        input_state: int,
+        content_type: str,
+        content_raw: str,
+        event_id: str,
+        msg_id: str,
+        msg_seq: int,
+        index: int,
+        stream_msg_id: str = None,
+    ) -> message.Message:
+        """发送或更新一帧 C2C 流式消息。"""
+
+        payload = {
+            "input_mode": input_mode,
+            "input_state": input_state,
+            "content_type": content_type,
+            "content_raw": content_raw,
+            "event_id": event_id,
+            "msg_id": msg_id,
+            "msg_seq": msg_seq,
+            "index": index,
+            "stream_msg_id": stream_msg_id,
+        }
+        payload = {key: value for key, value in payload.items() if value is not None}
+        route = Route("POST", "/v2/users/{openid}/stream_messages", openid=openid)
+        return await self._http.request(route, json=payload)
+
+    async def post_upload_prepare(
+        self,
+        scope: str,
+        target_id: str,
+        *,
+        file_type: int,
+        file_name: str,
+        file_size: int,
+        md5: str,
+        sha1: str,
+        md5_10m: str,
+    ) -> dict:
+        """准备 C2C 或群聊媒体分片上传。"""
+
+        if scope == "c2c":
+            route = Route("POST", "/v2/users/{target_id}/upload_prepare", target_id=target_id)
+        elif scope == "group":
+            route = Route("POST", "/v2/groups/{target_id}/upload_prepare", target_id=target_id)
+        else:
+            raise ValueError("chunked upload is only supported for c2c and group targets")
+        payload = {
+            "file_type": file_type,
+            "file_name": file_name,
+            "file_size": file_size,
+            "md5": md5,
+            "sha1": sha1,
+            "md5_10m": md5_10m,
+        }
+        return await self._http.request(route, json=payload, timeout=120, retry_unsafe=True)
+
+    async def put_upload_part(self, presigned_url: str, data: bytes, *, timeout: float = 300):
+        """将单个分片 PUT 到平台返回的 COS 预签名地址。"""
+
+        return await self._http.request_url(
+            "PUT",
+            presigned_url,
+            data=data,
+            headers={"Content-Length": str(len(data))},
+            auth=False,
+            retries=2,
+            timeout=timeout,
+        )
+
+    async def post_upload_part_finish(
+        self,
+        scope: str,
+        target_id: str,
+        *,
+        upload_id: str,
+        part_index: int,
+        block_size: int,
+        md5: str,
+    ):
+        """确认一个媒体分片已经上传完成。"""
+
+        if scope == "c2c":
+            route = Route("POST", "/v2/users/{target_id}/upload_part_finish", target_id=target_id)
+        elif scope == "group":
+            route = Route("POST", "/v2/groups/{target_id}/upload_part_finish", target_id=target_id)
+        else:
+            raise ValueError("chunked upload is only supported for c2c and group targets")
+        payload = {
+            "upload_id": upload_id,
+            "part_index": part_index,
+            "block_size": block_size,
+            "md5": md5,
+        }
+        return await self._http.request(route, json=payload, timeout=120, retry_unsafe=True)
+
+    async def post_upload_complete(self, scope: str, target_id: str, *, upload_id: str) -> message.Media:
+        """合并所有已确认分片并返回可发送的 ``file_info``。"""
+
+        if scope == "c2c":
+            route = Route("POST", "/v2/users/{target_id}/files", target_id=target_id)
+        elif scope == "group":
+            route = Route("POST", "/v2/groups/{target_id}/files", target_id=target_id)
+        else:
+            raise ValueError("chunked upload is only supported for c2c and group targets")
+        return await self._http.request(
+            route,
+            json={"upload_id": upload_id},
+            timeout=120,
+            retry_unsafe=True,
+        )
 
     async def post_group_file(
         self,
@@ -1494,6 +1742,7 @@ class BotAPI:
         url: str = None,
         srv_send_msg: bool = False,
         file_data: str = None,
+        file_name: str = None,
     ) -> message.Media:
         """
         上传/发送群聊图片
@@ -1504,19 +1753,27 @@ class BotAPI:
           url (str): 需要发送媒体资源的url
           srv_send_msg (bool): 设置 true 会直接发送消息到目标端，且会占用主动消息频次
           file_data (str): 媒体资源的 base64 编码数据
+          file_name (str): 普通文件在目标端显示的文件名
         """
-        payload = locals()
-        payload.pop("self", None)
+        payload = {
+            "file_type": file_type,
+            "url": url,
+            "srv_send_msg": srv_send_msg,
+            "file_data": file_data,
+            "file_name": file_name,
+        }
+        payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/groups/{group_openid}/files", group_openid=group_openid)
-        return await self._http.request(route, json=payload)
+        return await self._http.request(route, json=payload, timeout=120)
 
     async def post_c2c_file(
         self,
         openid: str,
         file_type: int,
-        url: str=None,
+        url: str = None,
         srv_send_msg: bool = False,
         file_data: str = None,
+        file_name: str = None,
     ) -> message.Media:
         """
         上传/发送c2c图片
@@ -1527,8 +1784,15 @@ class BotAPI:
           url (str): 需要发送媒体资源的url
           srv_send_msg (bool): 设置 true 会直接发送消息到目标端，且会占用主动消息频次
           file_data (str): 媒体资源的 base64 编码数据
+          file_name (str): 普通文件在目标端显示的文件名
         """
-        payload = locals()
-        payload.pop("self", None)
+        payload = {
+            "file_type": file_type,
+            "url": url,
+            "srv_send_msg": srv_send_msg,
+            "file_data": file_data,
+            "file_name": file_name,
+        }
+        payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/users/{openid}/files", openid=openid)
-        return await self._http.request(route, json=payload)
+        return await self._http.request(route, json=payload, timeout=120)

@@ -1,4 +1,4 @@
-from typing import Optional, TypedDict
+from typing import Any, NotRequired, Optional, TypedDict
 
 from ..robot import Token
 
@@ -15,3 +15,5 @@ class Session(TypedDict):
     token: Token
     url: str
     shards: ShardConfig
+    reconnect_policy: NotRequired[Any]
+    session_store: NotRequired[Any]

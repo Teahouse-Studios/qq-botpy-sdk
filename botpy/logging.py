@@ -3,10 +3,11 @@
 import os
 import sys
 import json
+import inspect
 import yaml
 import logging
 import logging.config
-from typing import List, Dict, Union
+from typing import Any, Dict, List, Optional, Union
 from logging.handlers import TimedRotatingFileHandler
 
 LOG_COLORS_CONFIG = {
@@ -44,8 +45,80 @@ logs: Dict[str, logging.Logger] = {}
 # 追加的handler
 _ext_handlers: List[dict] = []
 
+
+_LOG_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
+
 # 解决Windows系统cmd运行日志输出不会显示颜色问题
 os.system("")
+
+
+class LoguruHandler(logging.Handler):
+    """将标准库日志记录转发给 Loguru，且不强制依赖 ``loguru`` 包。"""
+
+    def __init__(self, loguru_logger: Any = None, level: int = logging.NOTSET) -> None:
+        super().__init__(level=level)
+        if loguru_logger is None:
+            try:
+                from loguru import logger as loguru_logger
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Loguru is not installed; install it with `pip install loguru`"
+                ) from exc
+        self.loguru_logger = loguru_logger
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = self.loguru_logger.level(record.levelname).name
+        except (AttributeError, ValueError, TypeError):
+            level = record.levelno
+
+        frame = inspect.currentframe()
+        depth = 0
+        while frame is not None and frame.f_code.co_filename in {__file__, logging.__file__}:
+            frame = frame.f_back
+            depth += 1
+
+        extra = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in _LOG_RECORD_FIELDS and key not in {"message", "asctime"}
+        }
+        extra.setdefault("stdlib_logger", record.name)
+        target = self.loguru_logger.bind(**extra) if hasattr(self.loguru_logger, "bind") else self.loguru_logger
+        target.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+
+def configure_loguru(
+    loguru_logger: Any = None,
+    *,
+    logger_name: Optional[str] = DEFAULT_LOGGER_NAME,
+    level: int = logging.DEBUG,
+    remove_handlers: bool = True,
+    propagate: bool = False,
+) -> LoguruHandler:
+    """把 botpy 或根标准库 logger 转发到 Loguru。
+
+    ``logger_name='botpy'`` 只接管 SDK 日志；传 ``None`` 时接管根 logger。
+    Loguru 的 sink、格式、轮转与异步队列仍由下游应用自行配置。
+    """
+
+    global _ext_handlers
+
+    target_logger = logging.getLogger(logger_name) if logger_name else logging.getLogger()
+    if remove_handlers:
+        for handler in tuple(target_logger.handlers):
+            target_logger.removeHandler(handler)
+            handler.close()
+        if logger_name == DEFAULT_LOGGER_NAME:
+            _ext_handlers.clear()
+
+    handler = LoguruHandler(loguru_logger, level=level)
+    target_logger.addHandler(handler)
+    target_logger.setLevel(level)
+    target_logger.propagate = propagate if logger_name else False
+    if logger_name:
+        logs[logger_name] = target_logger
+    return handler
 
 
 def get_handler(handler, name=DEFAULT_LOGGER_NAME):
@@ -148,7 +221,9 @@ def configure_logging(
         if DEFAULT_LOGGER_NAME in logs:
             logs.pop(DEFAULT_LOGGER_NAME)
 
-        logger.handlers = []
+        for handler in tuple(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
 
     if ext_handlers and (not _ext_handlers or force):
         if ext_handlers is True:
