@@ -38,7 +38,13 @@ examples/
 ## 环境安装
 
 ``` bash
-pip install qq-botpy
+pip install --upgrade qq-botpy-sdk
+```
+
+安装包名为 `qq-botpy-sdk`，Python 导入名仍为 `botpy`。需要仓库最新代码时可以使用：
+
+```bash
+pip install "git+https://github.com/Teahouse-Studios/qq-botpy-sdk.git"
 ```
 
 ## 使用方法

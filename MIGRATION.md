@@ -4,7 +4,7 @@
 
 ## 运行环境与依赖
 
-- 发布包名统一为 `qq-botpy`，Python 导入名仍为 `botpy`。
+- 独立维护版发布包名为 `qq-botpy-sdk`，Python 导入名仍为 `botpy`。
 - 最低 Python 版本为 3.10；这是最新 `aiohttp 3.14.x` 的最低版本要求。
 - `cryptography` 现在是 Webhook Ed25519 签名校验所需的正式运行时依赖。
 - Poetry、`setup.py` 和 `requirements.txt` 使用同一组依赖范围。
