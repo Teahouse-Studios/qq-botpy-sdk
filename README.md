@@ -72,7 +72,6 @@
 
 ### 中间件与存储
 
-- Koa 风格异步中间件链。
 - 消息过滤、内容清洗、访问策略、限流、并发保护和 Mention Gate。
 - Slash Command、Typing Indicator、错误处理和恢复中间件。
 - History Buffer、Quote Ref 和 LLM Envelope。
