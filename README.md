@@ -19,7 +19,6 @@
 - 本项目不是腾讯官方 SDK，也不代表腾讯或 QQ 机器人开放平台。
 - 问题反馈、功能请求和代码贡献请提交到
   [Teahouse-Studios/qq-botpy-sdk](https://github.com/Teahouse-Studios/qq-botpy-sdk)，不要提交给历史上游。
-- 原项目的 MIT 许可证与版权声明继续保留，详见 [LICENSE](./LICENSE)。
 - 独立维护期间会继续整理版本策略和公开 API，升级前请阅读 [迁移指南](./MIGRATION.md)。
 - QQ、QQ 机器人及相关名称和商标归其权利人所有。
 
