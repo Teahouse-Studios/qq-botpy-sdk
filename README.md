@@ -297,7 +297,6 @@ client = MyClient(
 | --- | --- |
 | [API 参考](./docs/API.md) | 新高层接口、统一发送、媒体、REST 和 Interaction |
 | [迁移指南](./MIGRATION.md) | 协议层改造后的行为变化与不兼容项 |
-| [Node SDK 能力对照](./docs/NODE_SDK_PARITY.md) | 与参考 Node SDK 的能力覆盖和有意保留的差异 |
 | [Loguru 配置指南](./docs/LOGURU.md) | 日志桥接、轮转、结构化字段和根 logger 接管 |
 | [发布指南](./docs/RELEASING.md) | GitHub Release、版本校验和 PyPI Trusted Publishing |
 | [事件监听](./docs/事件监听.md) | 历史事件回调列表 |
