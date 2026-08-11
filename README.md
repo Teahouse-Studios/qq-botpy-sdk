@@ -68,6 +68,7 @@
 - 5 MiB 以上自动切换分片上传，支持哈希、并发、进度回调和业务错误重试。
 - 按内容、目标和媒体类型缓存服务端 `file_info`。
 - 支持 C2C replace-mode 流式消息。
+- 支持群信息、入群申请审批、成员禁言与自动审批策略管理。
 - 提供高层 Interaction ACK。
 
 ### 中间件与存储
@@ -295,6 +296,7 @@ client = MyClient(
 | 文档 | 内容 |
 | --- | --- |
 | [API 参考](./docs/API.md) | 新高层接口、统一发送、媒体、REST 和 Interaction |
+| [群管理 API 与事件](./docs/GROUP_MANAGEMENT.md) | 群信息、入群审批、成员禁言、自动审批策略和群成员事件 |
 | [迁移指南](./MIGRATION.md) | 协议层改造后的行为变化与不兼容项 |
 | [Loguru 配置指南](./docs/LOGURU.md) | 日志桥接、轮转、结构化字段和根 logger 接管 |
 | [发布指南](./docs/RELEASING.md) | GitHub Release、版本校验和 PyPI Trusted Publishing |

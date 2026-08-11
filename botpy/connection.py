@@ -5,7 +5,7 @@ from typing import List, Callable, Dict, Any, Optional
 from .channel import Channel
 from .guild import Guild
 from .interaction import Interaction
-from .manage import C2CManageEvent, GroupManageEvent, GroupMemberEvent
+from .manage import C2CManageEvent, GroupJoinRequestEvent, GroupManageEvent, GroupMemberEvent
 from .message import C2CMessage, GroupMessage, Message, DirectMessage, MessageAudit
 from .user import Member
 from .reaction import Reaction
@@ -233,11 +233,11 @@ class ConnectionState:
 
     def parse_group_member_add(self, payload):
         _event = GroupMemberEvent(self.api, payload.get("id", None), payload.get("d", {}))
-        self._dispatch("message_group_member_add", _event)
+        self._dispatch("group_member_add", _event)
 
     def parse_group_member_remove(self, payload):
         _event = GroupMemberEvent(self.api, payload.get("id", None), payload.get("d", {}))
-        self._dispatch("message_group_member_remove", _event)
+        self._dispatch("group_member_remove", _event)
 
     def parse_group_add_robot(self, payload):
         _event = GroupManageEvent(self.api, payload.get("id", None), payload.get("d", {}))
@@ -254,6 +254,10 @@ class ConnectionState:
     def parse_group_msg_receive(self, payload):
         _event = GroupManageEvent(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("group_msg_receive", _event)
+
+    def parse_group_join_request(self, payload):
+        _event = GroupJoinRequestEvent(self.api, payload.get("id", None), payload.get("d", {}))
+        self._dispatch("group_join_request", _event)
 
     def parse_friend_add(self, payload):
         _event = C2CManageEvent(self.api, payload.get("id", None), payload.get("d", {}))

@@ -58,6 +58,18 @@ token = await client.api.get_token()
 
 POST/PATCH 默认不重试。只有确认接口具有幂等语义时，才传 `retry_unsafe=True`。
 
+## 群管理
+
+```python
+info = await client.api.get_group_info(group_openid)
+requests = await client.api.get_group_join_requests(group_openid, limit=20)
+mute_setting = await client.api.get_group_mute_setting(group_openid)
+strategies = await client.api.get_group_join_approval_strategies(limit=20)
+```
+
+群信息、入群申请审批、成员禁言、自动审批策略和新增群事件的完整说明见
+[群管理 API 与事件](./GROUP_MANAGEMENT.md)。
+
 ## Interaction
 
 ```python

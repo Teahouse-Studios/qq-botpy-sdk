@@ -3,6 +3,7 @@
 # 异步api
 
 from io import BufferedReader
+from collections.abc import Sequence
 from typing import Any, List, Union, BinaryIO, Dict, Mapping, Optional
 
 from .flags import Permission
@@ -20,7 +21,49 @@ from .types import (
     pins_message,
     reaction,
     forum,
+    group,
 )
+
+
+def _bounded_list(value: Sequence[Any], name: str, maximum: int) -> List[Any]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise TypeError(f"{name} must be a sequence")
+    items = list(value)
+    if not items:
+        raise ValueError(f"{name} must not be empty")
+    if len(items) > maximum:
+        raise ValueError(f"{name} supports at most {maximum} items")
+    return items
+
+
+def _validate_page_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError("limit must be an integer")
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+
+
+def _strategy_groups(
+    group_openids: Optional[Sequence[str]],
+    group_ids: Optional[Sequence[Union[int, str]]],
+    *,
+    required: bool,
+) -> Dict[str, List[Any]]:
+    if group_openids is not None and group_ids is not None:
+        raise ValueError("group_openids and group_ids are mutually exclusive")
+    if group_openids is None and group_ids is None:
+        if required:
+            raise ValueError("one of group_openids or group_ids is required")
+        return {}
+    if group_openids is not None:
+        values = _bounded_list(group_openids, "group_openids", 100)
+        if any(not isinstance(value, str) or not value for value in values):
+            raise ValueError("group_openids must contain non-empty strings")
+        return {"group_openids": values}
+    values = _bounded_list(group_ids, "group_ids", 100)
+    if any(isinstance(value, bool) or not isinstance(value, (int, str)) for value in values):
+        raise ValueError("group_ids must contain integers or strings")
+    return {"group_ids": values}
 
 
 class BotAPI:
@@ -1479,6 +1522,274 @@ class BotAPI:
             "DELETE", "/channels/{channel_id}/threads/{thread_id}", channel_id=channel_id, thread_id=thread_id
         )
         return await self._http.request(route)
+
+    # 群管理接口
+    async def get_group_info(self, group_openid: str) -> group.GroupInfo:
+        """获取指定群的基本信息。该接口可能需要平台白名单权限。"""
+
+        route = Route("GET", "/v2/groups/{group_openid}/info", group_openid=group_openid)
+        return await self._http.request(route)
+
+    async def get_group_bot_state(self, group_openid: str) -> group.GroupBotState:
+        """获取机器人在指定群中的状态。该接口可能需要平台白名单权限。"""
+
+        route = Route("GET", "/v2/groups/{group_openid}/bot_state", group_openid=group_openid)
+        return await self._http.request(route)
+
+    async def get_group_join_requests(
+        self,
+        group_openid: str,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 20,
+    ) -> group.JoinRequestList:
+        """分页获取群入群申请列表。机器人需要群管理员身份。"""
+
+        _validate_page_limit(limit)
+        params: Dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        route = Route(
+            "GET",
+            "/v2/groups/{group_openid}/join_request_list",
+            group_openid=group_openid,
+        )
+        return await self._http.request(route, params=params)
+
+    async def handle_group_join_request(
+        self,
+        group_openid: str,
+        member_openid: str,
+        *,
+        op: str,
+        join_request_id: Optional[str] = None,
+        reject_reason: Optional[str] = None,
+        add_to_member_blacklist: bool = False,
+    ) -> Any:
+        """审批入群申请，``op`` 为 ``approve`` 或 ``decline``。"""
+
+        if op not in {"approve", "decline"}:
+            raise ValueError("op must be 'approve' or 'decline'")
+        if not isinstance(add_to_member_blacklist, bool):
+            raise TypeError("add_to_member_blacklist must be a bool")
+        if op == "approve" and (reject_reason is not None or add_to_member_blacklist):
+            raise ValueError("reject options are only valid when op='decline'")
+
+        payload: Dict[str, Any] = {"op": op}
+        if join_request_id is not None:
+            payload["join_request_id"] = join_request_id
+        if op == "decline":
+            if reject_reason is not None:
+                payload["reject_reason"] = reject_reason
+            payload["add_to_member_blacklist"] = add_to_member_blacklist
+
+        route = Route(
+            "POST",
+            "/v2/groups/{group_openid}/approval_join_request/{member_openid}",
+            group_openid=group_openid,
+            member_openid=member_openid,
+        )
+        return await self._http.request(route, json=payload)
+
+    async def approve_group_join_request(
+        self,
+        group_openid: str,
+        member_openid: str,
+        *,
+        join_request_id: Optional[str] = None,
+    ) -> Any:
+        """通过一条入群申请。"""
+
+        return await self.handle_group_join_request(
+            group_openid,
+            member_openid,
+            op="approve",
+            join_request_id=join_request_id,
+        )
+
+    async def decline_group_join_request(
+        self,
+        group_openid: str,
+        member_openid: str,
+        *,
+        join_request_id: Optional[str] = None,
+        reject_reason: Optional[str] = None,
+        add_to_member_blacklist: bool = False,
+    ) -> Any:
+        """拒绝一条入群申请，并可同时加入群黑名单。"""
+
+        return await self.handle_group_join_request(
+            group_openid,
+            member_openid,
+            op="decline",
+            join_request_id=join_request_id,
+            reject_reason=reject_reason,
+            add_to_member_blacklist=add_to_member_blacklist,
+        )
+
+    async def get_group_mute_setting(self, group_openid: str) -> group.GroupMuteSetting:
+        """查询群级和成员级禁言状态。机器人需要群管理员身份。"""
+
+        route = Route(
+            "GET",
+            "/v2/groups/{group_openid}/restrict_chat_setting",
+            group_openid=group_openid,
+        )
+        return await self._http.request(route)
+
+    async def set_group_member_mutes(
+        self,
+        group_openid: str,
+        members: Sequence[group.SetMemberMuteState],
+    ) -> Any:
+        """批量增加、更新或解除群成员禁言，单次最多 10 人。"""
+
+        member_items = _bounded_list(members, "members", 10)
+        payload_members = []
+        for item in member_items:
+            if not isinstance(item, Mapping):
+                raise TypeError("each members item must be a mapping")
+            op = item.get("op")
+            member_openid = item.get("member_openid")
+            if op not in {"add", "update", "del"}:
+                raise ValueError("member mute op must be 'add', 'update', or 'del'")
+            if not isinstance(member_openid, str) or not member_openid:
+                raise ValueError("member_openid must be a non-empty string")
+            entry: Dict[str, Any] = {"op": op, "member_openid": member_openid}
+            if "mute_expire_at" in item:
+                entry["mute_expire_at"] = item["mute_expire_at"]
+            payload_members.append(entry)
+
+        route = Route(
+            "POST",
+            "/v2/groups/{group_openid}/restrict_chat_setting",
+            group_openid=group_openid,
+        )
+        return await self._http.request(route, json={"members": payload_members})
+
+    async def get_group_join_approval_strategies(
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 20,
+    ) -> group.JoinApprovalStrategyList:
+        """分页获取当前生效中的入群自动审批策略。"""
+
+        _validate_page_limit(limit)
+        params: Dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        route = Route("GET", "/v2/groups/join_approval_strategy")
+        return await self._http.request(route, params=params)
+
+    async def create_group_join_approval_strategy(
+        self,
+        *,
+        group_openids: Optional[Sequence[str]] = None,
+        group_ids: Optional[Sequence[Union[int, str]]] = None,
+        is_enable: str = "on",
+        expire_at: Optional[str] = None,
+        remark: Optional[str] = None,
+    ) -> group.JoinApprovalStrategyResult:
+        """创建入群自动审批策略。群 OpenID 与群号列表必须二选一。"""
+
+        if is_enable not in {"on", "off"}:
+            raise ValueError("is_enable must be 'on' or 'off'")
+        if remark is not None and len(remark) > 255:
+            raise ValueError("remark must not exceed 255 characters")
+        payload: Dict[str, Any] = _strategy_groups(group_openids, group_ids, required=True)
+        payload["is_enable"] = is_enable
+        if expire_at is not None:
+            payload["expire_at"] = expire_at
+        if remark is not None:
+            payload["remark"] = remark
+        route = Route("POST", "/v2/groups/join_approval_strategy")
+        return await self._http.request(route, json=payload)
+
+    async def update_group_join_approval_strategy(
+        self,
+        strategy_id: str,
+        *,
+        is_enable: Optional[str] = None,
+        expire_at: Optional[str] = None,
+        group_action: Optional[group.GroupAction] = None,
+        remark: Optional[str] = None,
+    ) -> group.JoinApprovalStrategyUpdateResult:
+        """修改入群自动审批策略的状态、有效期、关联群或备注。"""
+
+        payload: Dict[str, Any] = {}
+        if is_enable is not None:
+            if is_enable not in {"on", "off"}:
+                raise ValueError("is_enable must be 'on' or 'off'")
+            payload["is_enable"] = is_enable
+        if expire_at is not None:
+            payload["expire_at"] = expire_at
+        if remark is not None:
+            if len(remark) > 255:
+                raise ValueError("remark must not exceed 255 characters")
+            payload["remark"] = remark
+        if group_action is not None:
+            if not isinstance(group_action, Mapping):
+                raise TypeError("group_action must be a mapping")
+            op = group_action.get("op")
+            if op not in {"add", "del"}:
+                raise ValueError("group_action.op must be 'add' or 'del'")
+            targets = _strategy_groups(
+                group_action.get("group_openids"),
+                group_action.get("group_ids"),
+                required=True,
+            )
+            payload["group_action"] = {"op": op, **targets}
+        if not payload:
+            raise ValueError("at least one strategy field must be provided")
+
+        route = Route(
+            "PATCH",
+            "/v2/groups/join_approval_strategy/{strategy_id}",
+            strategy_id=strategy_id,
+        )
+        return await self._http.request(route, json=payload)
+
+    async def delete_group_join_approval_strategy(self, strategy_id: str) -> Any:
+        """删除一条入群自动审批策略。"""
+
+        route = Route(
+            "DELETE",
+            "/v2/groups/join_approval_strategy/{strategy_id}",
+            strategy_id=strategy_id,
+        )
+        return await self._http.request(route)
+
+    async def execute_group_join_approval_strategy(self, strategy_id: str) -> Any:
+        """异步扫描策略关联群并执行自动审批。"""
+
+        route = Route(
+            "POST",
+            "/v2/groups/join_approval_strategy/{strategy_id}/execute",
+            strategy_id=strategy_id,
+        )
+        return await self._http.request(route, json={})
+
+    async def update_group_join_approval_whitelist(
+        self,
+        strategy_id: str,
+        *,
+        op: str,
+        whitelist_users: Sequence[str],
+    ) -> group.JoinApprovalWhitelistResult:
+        """批量增加或删除策略白名单 QQ 号码，单次最多 10000 个。"""
+
+        if op not in {"add", "del"}:
+            raise ValueError("op must be 'add' or 'del'")
+        users = _bounded_list(whitelist_users, "whitelist_users", 10000)
+        if any(not isinstance(value, str) or not value for value in users):
+            raise ValueError("whitelist_users must contain non-empty strings")
+        route = Route(
+            "POST",
+            "/v2/groups/join_approval_strategy/{strategy_id}/whitelist_users",
+            strategy_id=strategy_id,
+        )
+        return await self._http.request(route, json={"op": op, "whitelist_users": users})
 
     async def post_group_message(
         self,

@@ -330,6 +330,9 @@ class Intents(BaseFlags):
         - :func:`on_group_del_robot`                    // 机器人退出群聊
         - :func:`on_group_msg_reject`                   // 群聊拒绝机器人主动消息
         - :func:`on_group_msg_receive`                  // 群聊接受机器人主动消息
+        - :func:`on_group_member_add`                   // 群成员加入
+        - :func:`on_group_member_remove`                // 群成员退出或被移出
+        - :func:`on_group_join_request`                 // 用户申请加入群聊
         - :func:`on_friend_add`                         // 用户添加机器人
         - :func:`on_friend_del`                         // 用户删除机器人
         - :func:`on_c2c_msg_reject`                     // 用户拒绝机器人主动消息

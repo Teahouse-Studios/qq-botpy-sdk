@@ -38,6 +38,11 @@ from .robot import Robot, Token
 
 _log = logging.get_logger()
 
+_LEGACY_EVENT_CALLBACKS = {
+    "group_member_add": "message_group_member_add",
+    "group_member_remove": "message_group_member_remove",
+}
+
 
 class _LoopSentinel:
     __slots__ = ()
@@ -1002,7 +1007,13 @@ class Client:
             coro = getattr(self, method)
             self._schedule_event(coro, method, *args, **kwargs)
         else:
-            _log.debug("[botpy] 事件: %s 未注册", event)
+            legacy_event = _LEGACY_EVENT_CALLBACKS.get(event)
+            legacy_method = f"on_{legacy_event}" if legacy_event else None
+            if legacy_method and hasattr(self, legacy_method):
+                coro = getattr(self, legacy_method)
+                self._schedule_event(coro, legacy_method, *args, **kwargs)
+            else:
+                _log.debug("[botpy] 事件: %s 未注册", event)
 
 
     def _schedule_event(

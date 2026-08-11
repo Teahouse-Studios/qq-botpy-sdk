@@ -4,7 +4,7 @@ import os
 import botpy
 from botpy import logging
 from botpy.ext.cog_yaml import read
-from botpy.manage import GroupManageEvent
+from botpy.manage import GroupJoinRequestEvent, GroupManageEvent, GroupMemberEvent
 
 test_config = read(os.path.join(os.path.dirname(__file__), "config.yaml"))
 
@@ -29,6 +29,17 @@ class MyClient(botpy.Client):
 
     async def on_group_msg_receive(self, event: GroupManageEvent):
         _log.info("群聊打开机器人主动消息：" + str(event))
+
+    async def on_group_member_add(self, event: GroupMemberEvent):
+        _log.info("群成员加入：" + str(event))
+
+    async def on_group_member_remove(self, event: GroupMemberEvent):
+        _log.info("群成员退出：" + str(event))
+
+    async def on_group_join_request(self, event: GroupJoinRequestEvent):
+        _log.info("收到入群申请：" + str(event))
+        # 请按业务规则完成风控检查后再审批；以下仅演示事件对象的便捷方法。
+        # await event.approve()
 
 
 if __name__ == "__main__":
