@@ -123,6 +123,19 @@ class MenuPanelApiTests(unittest.IsolatedAsyncioTestCase):
             params={"scope": "channel", "limit": 20},
         )
 
+    async def test_get_panels_returns_minimal_terminal_empty_page_unchanged(self):
+        expected = {"is_end": True}
+        self.http.responses.append(expected)
+
+        result = await self.api.get_panels("dm")
+
+        self.assertIs(expected, result)
+        self.assert_last_call(
+            "GET",
+            "/v2/panels",
+            params={"scope": "dm", "limit": 20},
+        )
+
     async def test_create_global_panel_sends_scope_target_and_panel(self):
         expected = {"panel_id": "panel-global"}
         self.http.responses.append(expected)

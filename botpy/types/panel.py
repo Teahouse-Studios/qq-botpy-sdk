@@ -32,9 +32,12 @@ class PanelRecord(TypedDict, total=False):
     version: int
 
 
-class PanelListResponse(TypedDict):
+class _PanelListOptionalFields(TypedDict, total=False):
     records: List[PanelRecord]
     next_cursor: str
+
+
+class PanelListResponse(_PanelListOptionalFields):
     is_end: bool
 
 

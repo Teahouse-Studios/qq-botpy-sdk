@@ -143,6 +143,9 @@ group 支持 `specific`：
 这种行为允许声明式面板和平台侧手工维护的面板共存，也降低遗漏一项配置导致线上资源被删除的风险。需要移除
 面板时，应显式调用 `await client.api.delete_panel(panel_id)`；仅从 `panels` 列表删除不会删除远端面板。
 
+平台的空面板页可能只返回 `{"is_end": true}` 并省略 `records` 与 `next_cursor`，SDK 会将其兼容为空列表；
+非末页响应仍必须包含有效的 `next_cursor`。
+
 `config_sync_strict` 控制启动同步失败时的行为：
 
 - `False`（默认）：记录同步错误并继续启动。机器人仍可收发事件，但菜单或面板可能保留旧配置或只同步了一部分。

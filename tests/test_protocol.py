@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 import unittest
 
@@ -153,6 +154,54 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("https://api.sgroup.qq.com/test", url)
         self.assertEqual("QQBot access-token", kwargs["headers"]["Authorization"])
         self.assertEqual("app-id", kwargs["headers"]["X-Union-Appid"])
+
+    async def test_debug_log_includes_redacted_truncated_response_and_safe_url(self):
+        logger = logging.getLogger("tests.botpy.protocol.response")
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        session = FakeSession(
+            [
+                FakeResponse(
+                    payload={
+                        "is_end": True,
+                        "access-token": "token-secret",
+                        "user_openids": ["user-secret"],
+                        "content": "message-secret",
+                        "nested": {"safe": "x" * 2000},
+                    },
+                    headers={"X-Tps-trace-Id": "trace-id"},
+                )
+            ]
+        )
+        client = ApiClient(FakeTokenProvider(), session=session, logger=logger)
+
+        with self.assertLogs(logger, level="DEBUG") as captured:
+            await client.get(
+                "https://upload.example.com/object?X-Amz-Signature=query-secret",
+                auth=False,
+            )
+
+        output = "\n".join(captured.output)
+        self.assertIn('"is_end":true', output)
+        self.assertIn("<redacted>", output)
+        self.assertIn("chars truncated", output)
+        self.assertIn("https://upload.example.com/object", output)
+        for secret in ("token-secret", "user-secret", "message-secret", "query-secret"):
+            self.assertNotIn(secret, output)
+
+    async def test_response_summary_does_not_repr_unknown_objects(self):
+        from botpy.protocol.http import _summarize_payload
+
+        class SecretObject:
+            def __repr__(self):
+                return "unknown-object-secret"
+
+        summary = _summarize_payload({"value": SecretObject(), "data": b"secret bytes"})
+
+        self.assertNotIn("unknown-object-secret", summary)
+        self.assertNotIn("secret bytes", summary)
+        self.assertIn("<SecretObject>", summary)
+        self.assertIn("bytes", summary)
 
     async def test_safe_request_retries_transport_error(self):
         delays = []

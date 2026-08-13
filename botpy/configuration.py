@@ -407,16 +407,24 @@ class ConfigurationManager:
             seen = set()
             while True:
                 response = await self.api.get_panels(scope, cursor=cursor, limit=50)
-                if not isinstance(response, Mapping) or not isinstance(response.get("records"), list):
+                if not isinstance(response, Mapping):
                     raise ConfigurationSyncError("remote panel list response is malformed")
-                if any(not isinstance(record, Mapping) for record in response["records"]):
+                is_end = response.get("is_end")
+                if not isinstance(is_end, bool):
+                    raise ConfigurationSyncError("remote panel list is_end is malformed")
+                page_records = response.get("records", [])
+                if not isinstance(page_records, list):
+                    raise ConfigurationSyncError("remote panel list records are malformed")
+                if any(not isinstance(record, Mapping) for record in page_records):
                     raise ConfigurationSyncError("remote panel record is malformed")
-                records.extend(response["records"])
-                next_cursor = response.get("next_cursor")
-                if response.get("is_end") is True or not next_cursor:
+                records.extend(page_records)
+                if is_end:
                     break
+                next_cursor = response.get("next_cursor")
                 if not isinstance(next_cursor, str) or next_cursor in seen:
                     raise ConfigurationSyncError("remote panel cursor is malformed")
+                if not next_cursor:
+                    raise ConfigurationSyncError("remote panel cursor is missing before the final page")
                 seen.add(next_cursor)
                 cursor = next_cursor
         return records

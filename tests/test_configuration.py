@@ -232,6 +232,92 @@ class DeclarativeConfigurationTests(unittest.IsolatedAsyncioTestCase):
             await ConfigurationManager(api, panels=[Panel("managed", scope="c2c", items=[])]).sync()
         self.assertFalse(any(call[0] == "create_panel" for call in api.calls))
 
+    async def test_terminal_empty_panel_page_may_omit_records_and_next_cursor(self):
+        class MinimalEmptyPageApi(FakeApi):
+            async def get_panels(self, scope, *, cursor=None, limit=20):
+                self.calls.append(("get_panels", scope, cursor, limit))
+                return {"is_end": True}
+
+        api = MinimalEmptyPageApi()
+
+        result = await ConfigurationManager(
+            api,
+            panels=[Panel("managed", scope="c2c", items=[])],
+        ).sync()
+
+        self.assertEqual(1, result.panels_created)
+        self.assertEqual(4, sum(call[0] == "get_panels" for call in api.calls))
+
+    async def test_non_terminal_panel_page_requires_non_empty_string_cursor(self):
+        class InvalidCursorApi(FakeApi):
+            def __init__(self, response):
+                super().__init__()
+                self.response = response
+
+            async def get_panels(self, scope, *, cursor=None, limit=20):
+                return self.response
+
+        cases = (
+            {"records": [], "is_end": False},
+            {"records": [], "is_end": False, "next_cursor": ""},
+            {"records": [], "is_end": False, "next_cursor": 123},
+        )
+
+        for response in cases:
+            with self.subTest(response=response):
+                manager = ConfigurationManager(
+                    InvalidCursorApi(response),
+                    panels=[Panel("managed", scope="c2c", items=[])],
+                )
+                with self.assertRaisesRegex(ConfigurationSyncError, "cursor"):
+                    await manager.sync()
+
+    async def test_terminal_panel_page_rejects_explicit_null_records(self):
+        class NullRecordsApi(FakeApi):
+            async def get_panels(self, scope, *, cursor=None, limit=20):
+                return {"records": None, "is_end": True}
+
+        with self.assertRaisesRegex(ConfigurationSyncError, "records"):
+            await ConfigurationManager(
+                NullRecordsApi(),
+                panels=[Panel("managed", scope="c2c", items=[])],
+            ).sync()
+
+    async def test_non_terminal_panel_page_follows_cursor_to_minimal_final_page(self):
+        class TwoPageApi(FakeApi):
+            async def get_panels(self, scope, *, cursor=None, limit=20):
+                self.calls.append(("get_panels", scope, cursor, limit))
+                if cursor is None:
+                    return {"is_end": False, "next_cursor": f"{scope}-next"}
+                self.asserted_cursor = cursor
+                return {"is_end": True}
+
+        api = TwoPageApi()
+
+        result = await ConfigurationManager(
+            api,
+            panels=[Panel("managed", scope="c2c", items=[])],
+        ).sync()
+
+        self.assertEqual(1, result.panels_created)
+        panel_calls = [call for call in api.calls if call[0] == "get_panels"]
+        self.assertEqual(8, len(panel_calls))
+        for scope in ("c2c", "group", "channel", "dm"):
+            self.assertIn(("get_panels", scope, f"{scope}-next", 50), panel_calls)
+
+    async def test_non_terminal_panel_cursor_must_advance(self):
+        class RepeatingCursorApi(FakeApi):
+            async def get_panels(self, scope, *, cursor=None, limit=20):
+                return {"records": [], "is_end": False, "next_cursor": "same"}
+
+        manager = ConfigurationManager(
+            RepeatingCursorApi(),
+            panels=[Panel("managed", scope="c2c", items=[])],
+        )
+
+        with self.assertRaisesRegex(ConfigurationSyncError, "cursor"):
+            await manager.sync()
+
     async def test_concurrent_sync_is_singleflight(self):
         class BlockingApi(FakeApi):
             def __init__(self):

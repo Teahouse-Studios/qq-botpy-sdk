@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from urllib.parse import urlsplit, urlunsplit
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Protocol
 
 import aiohttp
@@ -10,6 +11,91 @@ from .errors import ApiError, TransportError
 
 TRACE_ID_HEADER = "X-Tps-trace-Id"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
+MAX_LOG_SUMMARY_CHARS = 1024
+MAX_LOG_DEPTH = 4
+MAX_LOG_ITEMS = 20
+SENSITIVE_LOG_KEYS = {
+    "access_token",
+    "app_secret",
+    "authorization",
+    "bot_token",
+    "client_secret",
+    "content",
+    "content_raw",
+    "cookie",
+    "credential",
+    "email",
+    "file_data",
+    "file_image",
+    "file_info",
+    "group_openid",
+    "group_openids",
+    "member_openid",
+    "openid",
+    "openids",
+    "phone",
+    "presigned_url",
+    "refresh_token",
+    "secret",
+    "send_message",
+    "set_cookie",
+    "sign",
+    "signature",
+    "token",
+    "union_openid",
+    "upload_id",
+    "user_openid",
+    "user_openids",
+    "verify_message",
+}
+NORMALIZED_SENSITIVE_LOG_KEYS = {
+    "".join(character for character in key.casefold() if character.isalnum())
+    for key in SENSITIVE_LOG_KEYS
+}
+
+
+def _safe_url(url: str) -> str:
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _redact_log_value(value: Any, depth: int = 0) -> Any:
+    if depth >= MAX_LOG_DEPTH:
+        return "<max-depth>"
+    if isinstance(value, Mapping):
+        result = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= MAX_LOG_ITEMS:
+                result["<truncated>"] = f"{len(value) - MAX_LOG_ITEMS} more fields"
+                break
+            normalized = "".join(character for character in str(key).casefold() if character.isalnum())
+            result[str(key)] = (
+                "<redacted>"
+                if normalized in NORMALIZED_SENSITIVE_LOG_KEYS
+                else _redact_log_value(item, depth + 1)
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        items = [_redact_log_value(item, depth + 1) for item in value[:MAX_LOG_ITEMS]]
+        if len(value) > MAX_LOG_ITEMS:
+            items.append(f"<{len(value) - MAX_LOG_ITEMS} more items>")
+        return items
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"<{type(value).__name__} {len(value)} bytes>"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return f"<{type(value).__name__}>"
+
+
+def _summarize_payload(payload: Any) -> str:
+    redacted = _redact_log_value(payload)
+    try:
+        summary = json.dumps(redacted, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        summary = f"<{type(redacted).__name__}>"
+    if len(summary) <= MAX_LOG_SUMMARY_CHARS:
+        return summary
+    return summary[:MAX_LOG_SUMMARY_CHARS] + f"...<{len(summary) - MAX_LOG_SUMMARY_CHARS} chars truncated>"
 
 
 class AccessTokenProvider(Protocol):
@@ -84,6 +170,7 @@ class ApiClient:
     ) -> Any:
         method = method.upper()
         url = self._build_url(path)
+        log_url = _safe_url(url)
         max_retries = self.max_retries if retries is None else max(0, retries)
         can_retry = method in SAFE_METHODS or retry_unsafe
         request_headers: Dict[str, str] = dict(headers or {})
@@ -118,13 +205,15 @@ class ApiClient:
                     trace_id = response.headers.get(TRACE_ID_HEADER)
 
                     if 200 <= response.status < 300:
-                        self._logger.debug(
-                            "[botpy] HTTP %s %s -> %s trace_id=%s",
-                            method,
-                            url,
-                            response.status,
-                            trace_id,
-                        )
+                        if self._logger.isEnabledFor(logging.DEBUG):
+                            self._logger.debug(
+                                "[botpy] HTTP %s %s -> %s trace_id=%s response=%s",
+                                method,
+                                log_url,
+                                response.status,
+                                trace_id,
+                                _summarize_payload(payload),
+                            )
                         return payload
 
                     if (
@@ -152,6 +241,15 @@ class ApiClient:
                         await self._sleep(retry_after if retry_after is not None else self._delay(attempt))
                         attempt += 1
                         continue
+                    if self._logger.isEnabledFor(logging.DEBUG):
+                        self._logger.debug(
+                            "[botpy] HTTP %s %s -> %s trace_id=%s response=%s",
+                            method,
+                            log_url,
+                            response.status,
+                            trace_id,
+                            _summarize_payload(payload),
+                        )
                     raise error
             except ApiError:
                 raise
