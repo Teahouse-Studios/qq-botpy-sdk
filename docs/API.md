@@ -5,6 +5,9 @@
 ```python
 client = botpy.Client(
     intents=intents,
+    menu=menu,
+    panels=panels,
+    config_sync_strict=False,
     markdown_support=False,
     base_url="https://api.sgroup.qq.com",
     token_base_url="https://bots.qq.com",
@@ -23,6 +26,10 @@ client = botpy.Client(
 首次登录会同步获取 token，随后启动后台提前刷新循环；`Client.close()` 会停止该任务。
 
 `loguru_logger` 是可选兼容入口，不会让 Loguru 成为强制依赖。配置方法见 [LOGURU.md](./LOGURU.md)。
+
+`menu` 和 `panels` 用于声明机器人启动时要同步的全局菜单与指令面板。`config_sync_strict=False` 时同步失败会
+记录错误并继续启动；设为 `True` 时同步失败将中止启动。构造方法、同步边界与多副本部署注意事项见
+[自定义菜单与指令面板](./MENU_PANEL.md)。
 
 ## 统一消息发送
 
@@ -69,6 +76,32 @@ strategies = await client.api.get_group_join_approval_strategies(limit=20)
 
 群信息、入群申请审批、成员禁言、自动审批策略和新增群事件的完整说明见
 [群管理 API 与事件](./GROUP_MANAGEMENT.md)。
+
+## 自定义菜单与指令面板
+
+```python
+from botpy.configuration import Menu, Panel
+
+menu = Menu(items=[Menu.message("帮助", "/help")])
+panel = Panel(
+    "main",
+    scope="c2c",
+    items=[Panel.command("查询天气", desc="查询当前天气")],
+)
+
+client = botpy.Client(
+    intents=intents,
+    menu=menu,
+    panels=[panel],
+)
+```
+
+平台只提供一个 C2C 全局菜单，但一个机器人可以配置多个不同场景的 Panel。SDK 使用 Panel 的稳定 key 匹配受管
+资源，启动时创建或更新当前声明，不自动删除未声明或非受管面板。完整说明见
+[自定义菜单与指令面板](./MENU_PANEL.md)。
+
+底层 REST 方法包括 `get_global_menu()`、`update_global_menu()`、`get_panels()`、`create_panel()`、
+`get_panel()`、`update_panel()`、`update_panel_targets()` 和 `delete_panel()`。
 
 ## Interaction
 

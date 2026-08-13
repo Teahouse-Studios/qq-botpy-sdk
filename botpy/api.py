@@ -5,6 +5,7 @@
 from io import BufferedReader
 from collections.abc import Sequence
 from typing import Any, List, Union, BinaryIO, Dict, Mapping, Optional
+from urllib.parse import urlsplit
 
 from .flags import Permission
 from .http import BotHttp, Route
@@ -22,6 +23,8 @@ from .types import (
     reaction,
     forum,
     group,
+    menu,
+    panel,
 )
 
 
@@ -41,6 +44,186 @@ def _validate_page_limit(limit: int) -> None:
         raise TypeError("limit must be an integer")
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
+
+
+def _validate_panel_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError("limit must be an integer")
+    if not 1 <= limit <= 50:
+        raise ValueError("limit must be between 1 and 50")
+
+
+def _optional_list(value: Sequence[Any], name: str, maximum: int) -> List[Any]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise TypeError(f"{name} must be a sequence")
+    items = list(value)
+    if len(items) > maximum:
+        raise ValueError(f"{name} supports at most {maximum} items")
+    return items
+
+
+def _text_width(value: str) -> int:
+    """Count ASCII as one unit and non-ASCII characters as two platform units."""
+
+    return sum(1 if ord(character) < 128 else 2 for character in value)
+
+
+def _required_text(value: Any, name: str, maximum: Optional[int] = None) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty string")
+    if maximum is not None and _text_width(value) > maximum:
+        raise ValueError(f"{name} must not exceed {maximum} character units")
+    return value
+
+
+def _validate_https_url(value: Any, name: str) -> str:
+    url = _required_text(value, name)
+    if any(ord(character) < 32 or ord(character) == 127 for character in url):
+        raise ValueError(f"{name} must not contain control characters")
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError(f"{name} must be a valid HTTPS URL")
+    return url
+
+
+def _validate_sub_menu_item(value: Any, index: int) -> Dict[str, Any]:
+    name = f"menu.items[].sub_menu_items[{index}]"
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    item = dict(value)
+    _required_text(item.get("name"), f"{name}.name", 14)
+    item_type = item.get("type")
+    if item_type not in {"send_message", "link"}:
+        raise ValueError(f"{name}.type must be 'send_message' or 'link'")
+    if item_type == "send_message":
+        _required_text(item.get("send_message"), f"{name}.send_message")
+    else:
+        _validate_https_url(item.get("link"), f"{name}.link")
+    return item
+
+
+def _validate_menu(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError("menu must be a mapping")
+    result = dict(value)
+    if "items" not in result:
+        return result
+    items = _optional_list(result["items"], "menu.items", 10)
+    normalized = []
+    for index, raw_item in enumerate(items):
+        name = f"menu.items[{index}]"
+        if not isinstance(raw_item, Mapping):
+            raise TypeError(f"{name} must be a mapping")
+        item = dict(raw_item)
+        _required_text(item.get("name"), f"{name}.name", 10)
+        item_type = item.get("type")
+        if item_type not in {"switch", "send_message", "link", "menu"}:
+            raise ValueError(f"{name}.type is invalid")
+        if item_type == "switch":
+            switch = item.get("switch")
+            if not isinstance(switch, Mapping):
+                raise TypeError(f"{name}.switch must be a mapping")
+            _required_text(switch.get("switch_id"), f"{name}.switch.switch_id")
+            if not isinstance(switch.get("default"), bool):
+                raise TypeError(f"{name}.switch.default must be a bool")
+            item["switch"] = dict(switch)
+        elif item_type == "send_message":
+            _required_text(item.get("send_message"), f"{name}.send_message")
+        elif item_type == "link":
+            _validate_https_url(item.get("link"), f"{name}.link")
+        else:
+            sub_items = _bounded_list(item.get("sub_menu_items"), f"{name}.sub_menu_items", 5)
+            item["sub_menu_items"] = [
+                _validate_sub_menu_item(sub_item, sub_index)
+                for sub_index, sub_item in enumerate(sub_items)
+            ]
+        normalized.append(item)
+    result["items"] = normalized
+    return result
+
+
+def _validate_panel(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError("panel must be a mapping")
+    result = dict(value)
+    if "remark" in result:
+        remark = result["remark"]
+        if not isinstance(remark, str):
+            raise TypeError("panel.remark must be a string")
+        if len(remark) > 255:
+            raise ValueError("panel.remark must not exceed 255 characters")
+    if "version" in result:
+        version = result["version"]
+        if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+            raise ValueError("panel.version must be a non-negative integer")
+    if "items" not in result:
+        return result
+    items = _optional_list(result["items"], "panel.items", 20)
+    normalized = []
+    for index, raw_item in enumerate(items):
+        name = f"panel.items[{index}]"
+        if not isinstance(raw_item, Mapping):
+            raise TypeError(f"{name} must be a mapping")
+        item = dict(raw_item)
+        _required_text(item.get("name"), f"{name}.name", 14)
+        item_type = item.get("type")
+        if item_type not in {"command", "link"}:
+            raise ValueError(f"{name}.type must be 'command' or 'link'")
+        if "desc" in item:
+            if not isinstance(item["desc"], str):
+                raise TypeError(f"{name}.desc must be a string")
+            if _text_width(item["desc"]) > 30:
+                raise ValueError(f"{name}.desc must not exceed 30 character units")
+        if "only_admin" in item and not isinstance(item["only_admin"], bool):
+            raise TypeError(f"{name}.only_admin must be a bool")
+        if item_type == "link":
+            _validate_https_url(item.get("link"), f"{name}.link")
+        normalized.append(item)
+    result["items"] = normalized
+    return result
+
+
+def _validate_panel_scope(scope: str) -> str:
+    if scope not in {"c2c", "group", "channel", "dm"}:
+        raise ValueError("scope must be 'c2c', 'group', 'channel', or 'dm'")
+    return scope
+
+
+def _openid_list(value: Sequence[str], name: str) -> List[str]:
+    values = _bounded_list(value, name, 20)
+    if any(not isinstance(item, str) or not item for item in values):
+        raise ValueError(f"{name} must contain non-empty strings")
+    return values
+
+
+def _validate_panel_targets(
+    scope: str,
+    target_type: str,
+    user_openids: Optional[Sequence[str]],
+    group_openids: Optional[Sequence[str]],
+) -> Dict[str, List[str]]:
+    _validate_panel_scope(scope)
+    if target_type not in {"all", "specific"}:
+        raise ValueError("target_type must be 'all' or 'specific'")
+    if scope in {"channel", "dm"} and target_type != "all":
+        raise ValueError("channel and dm panels only support target_type='all'")
+    if target_type == "all":
+        if user_openids is not None or group_openids is not None:
+            raise ValueError("target lists are not supported when target_type='all'")
+        return {}
+    if scope == "c2c":
+        if group_openids is not None:
+            raise ValueError("group_openids is only valid for group panels")
+        if user_openids is None:
+            raise ValueError("user_openids is required for a specific c2c panel")
+        return {"user_openids": _openid_list(user_openids, "user_openids")}
+    if scope == "group":
+        if user_openids is not None:
+            raise ValueError("user_openids is only valid for c2c panels")
+        if group_openids is None:
+            raise ValueError("group_openids is required for a specific group panel")
+        return {"group_openids": _openid_list(group_openids, "group_openids")}
+    raise ValueError("specific panels are only supported for c2c and group scopes")
 
 
 def _strategy_groups(
@@ -1522,6 +1705,125 @@ class BotAPI:
             "DELETE", "/channels/{channel_id}/threads/{thread_id}", channel_id=channel_id, thread_id=thread_id
         )
         return await self._http.request(route)
+
+    # 全局自定义菜单
+    async def get_menu(self) -> menu.GlobalMenuResponse:
+        """查询当前生效的 C2C 全局自定义菜单。"""
+
+        route = Route("GET", "/v2/menu")
+        return await self._http.request(route)
+
+    async def update_menu(self, menu_config: menu.Menu) -> menu.MenuVersionResponse:
+        """全量覆盖当前 C2C 全局自定义菜单。"""
+
+        validated_menu = _validate_menu(menu_config)
+        route = Route("PUT", "/v2/menu")
+        return await self._http.request(route, json={"menu": validated_menu})
+
+    async def get_global_menu(self) -> menu.GlobalMenuResponse:
+        """``get_menu`` 的语义化别名。"""
+
+        return await self.get_menu()
+
+    async def update_global_menu(self, menu_config: menu.Menu) -> menu.MenuVersionResponse:
+        """``update_menu`` 的语义化别名。"""
+
+        return await self.update_menu(menu_config)
+
+    # 指令面板
+    async def get_panels(
+        self,
+        scope: panel.PanelScope,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 20,
+    ) -> panel.PanelListResponse:
+        """分页查询指定聊天场景中当前生效的指令面板。"""
+
+        _validate_panel_scope(scope)
+        _validate_panel_limit(limit)
+        if cursor is not None and not isinstance(cursor, str):
+            raise TypeError("cursor must be a string or None")
+        params: Dict[str, Any] = {"scope": scope, "limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        route = Route("GET", "/v2/panels")
+        return await self._http.request(route, params=params)
+
+    async def create_panel(
+        self,
+        scope: panel.PanelScope,
+        panel_config: panel.Panel,
+        *,
+        target_type: panel.PanelTargetType = "all",
+        user_openids: Optional[Sequence[str]] = None,
+        group_openids: Optional[Sequence[str]] = None,
+    ) -> panel.PanelCreateResponse:
+        """创建一块指令面板，并可为 C2C 用户或群指定生效对象。"""
+
+        targets = _validate_panel_targets(
+            scope,
+            target_type,
+            user_openids,
+            group_openids,
+        )
+        payload: Dict[str, Any] = {
+            "scope": scope,
+            "target_type": target_type,
+            "panel": _validate_panel(panel_config),
+            **targets,
+        }
+        route = Route("POST", "/v2/panels")
+        return await self._http.request(route, json=payload)
+
+    async def get_panel(self, panel_id: str) -> panel.PanelDetail:
+        """查询一块指令面板的完整配置和关联对象。"""
+
+        _required_text(panel_id, "panel_id")
+        route = Route("GET", "/v2/panels/{panel_id}", panel_id=panel_id)
+        return await self._http.request(route)
+
+    async def update_panel(
+        self,
+        panel_id: str,
+        panel_config: panel.Panel,
+    ) -> panel.PanelVersionResponse:
+        """全量覆盖指定指令面板的元素和备注。"""
+
+        _required_text(panel_id, "panel_id")
+        payload = {"panel": _validate_panel(panel_config)}
+        route = Route("PUT", "/v2/panels/{panel_id}", panel_id=panel_id)
+        return await self._http.request(route, json=payload)
+
+    async def delete_panel(self, panel_id: str) -> Any:
+        """删除指定指令面板。"""
+
+        _required_text(panel_id, "panel_id")
+        route = Route("DELETE", "/v2/panels/{panel_id}", panel_id=panel_id)
+        return await self._http.request(route)
+
+    async def update_panel_targets(
+        self,
+        panel_id: str,
+        *,
+        op: panel.PanelTargetOperation,
+        user_openids: Optional[Sequence[str]] = None,
+        group_openids: Optional[Sequence[str]] = None,
+    ) -> Any:
+        """增加或移除一块 specific 指令面板的关联用户或群。"""
+
+        _required_text(panel_id, "panel_id")
+        if op not in {"add", "del"}:
+            raise ValueError("op must be 'add' or 'del'")
+        if (user_openids is None) == (group_openids is None):
+            raise ValueError("exactly one of user_openids or group_openids is required")
+        payload: Dict[str, Any] = {"op": op}
+        if user_openids is not None:
+            payload["user_openids"] = _openid_list(user_openids, "user_openids")
+        else:
+            payload["group_openids"] = _openid_list(group_openids, "group_openids")
+        route = Route("PUT", "/v2/panels/{panel_id}/target", panel_id=panel_id)
+        return await self._http.request(route, json=payload)
 
     # 群管理接口
     async def get_group_info(self, group_openid: str) -> group.GroupInfo:

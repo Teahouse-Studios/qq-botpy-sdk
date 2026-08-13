@@ -69,6 +69,7 @@
 - 按内容、目标和媒体类型缓存服务端 `file_info`。
 - 支持 C2C replace-mode 流式消息。
 - 支持群信息、入群申请审批、成员禁言与自动审批策略管理。
+- 支持声明式全局菜单和多指令面板，并在启动时同步平台配置。
 - 提供高层 Interaction ACK。
 
 ### 中间件与存储
@@ -267,6 +268,33 @@ guilds = await client.api.get(
 token = await client.api.get_token()
 ```
 
+### 自定义菜单与指令面板
+
+```python
+from botpy.configuration import Menu, Panel
+
+client = MyClient(
+    intents=intents,
+    menu=Menu(
+        items=[
+            Menu.message("帮助", "/help"),
+            Menu.link("官网", "https://example.com"),
+        ]
+    ),
+    panels=[
+        Panel(
+            "main",
+            scope="c2c",
+            items=[Panel.command("查询天气", desc="查询当前天气")],
+        )
+    ],
+    config_sync_strict=False,
+)
+```
+
+SDK 在客户端启动后同步声明的单个全局菜单和多个受管面板。多副本部署、strict 模式和非破坏性同步边界见
+[自定义菜单与指令面板](./docs/MENU_PANEL.md)。
+
 ### 使用 Loguru
 
 ```python
@@ -296,6 +324,7 @@ client = MyClient(
 | 文档 | 内容 |
 | --- | --- |
 | [API 参考](./docs/API.md) | 新高层接口、统一发送、媒体、REST 和 Interaction |
+| [自定义菜单与指令面板](./docs/MENU_PANEL.md) | 声明式 Menu/Panel、启动同步和多副本部署风险 |
 | [群管理 API 与事件](./docs/GROUP_MANAGEMENT.md) | 群信息、入群审批、成员禁言、自动审批策略和群成员事件 |
 | [迁移指南](./MIGRATION.md) | 协议层改造后的行为变化与不兼容项 |
 | [Loguru 配置指南](./docs/LOGURU.md) | 日志桥接、轮转、结构化字段和根 logger 接管 |

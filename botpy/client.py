@@ -12,6 +12,7 @@ from weakref import WeakSet
 
 from . import logging
 from .api import BotAPI
+from .configuration import ConfigurationManager, Menu, Panel
 from .connection import ConnectionSession, ConnectionState
 from .flags import Intents
 from .gateway import BotWebSocket
@@ -83,6 +84,9 @@ class Client:
         reply_limiter: Optional[ReplyLimiter] = None,
         on_message_sent: Optional[Callable[[str, Mapping[str, Any]], Any]] = None,
         loguru_logger: Any = None,
+        menu: Optional[Menu] = None,
+        panels: Optional[Iterable[Panel]] = None,
+        config_sync_strict: bool = False,
     ):
         """
         Args:
@@ -107,6 +111,9 @@ class Client:
           reply_limiter: 自定义被动回复限制器；默认每条消息每小时最多 4 次。
           on_message_sent: 平台响应包含 ``ext_info.ref_idx`` 时调用的出站消息钩子。
           loguru_logger: 可选的 Loguru logger；提供后 botpy 标准库日志会转发到该 logger。
+          menu: 可选的声明式 C2C 全局菜单；配置后在登录成功时按差异同步。
+          panels: 可选的声明式指令面板集合；使用稳定 key 非破坏性同步。
+          config_sync_strict: 配置同步失败时是否中止客户端启动。
         """
         self.intents: int = intents.value
         self.ret_coro: bool = False
@@ -120,6 +127,8 @@ class Client:
             self._owns_loop = True
         if not isinstance(markdown_support, bool):
             raise TypeError("markdown_support must be a bool")
+        if not isinstance(config_sync_strict, bool):
+            raise TypeError("config_sync_strict must be a bool")
         self._markdown_support = markdown_support
         self._token_base_url = token_base_url
         self._user_agent = user_agent
@@ -133,6 +142,12 @@ class Client:
             ssl=ssl,
         )
         self.api: BotAPI = BotAPI(http=self.http)
+        self.configuration = ConfigurationManager(
+            self.api,
+            menu=menu,
+            panels=tuple(panels or ()),
+        )
+        self._config_sync_strict = config_sync_strict
 
         self._connection: Optional[ConnectionSession] = None
         self._closed: bool = False
@@ -731,6 +746,10 @@ class Client:
             except Exception as exc:
                 _log.warning("[botpy] 关闭 Gateway Session Store 失败: %s", exc)
 
+        configuration = getattr(self, "configuration", None)
+        if configuration is not None:
+            await configuration.close()
+
         await self.http.close()
         upload_cache = getattr(self, "_upload_cache", None)
         if upload_cache is not None:
@@ -840,6 +859,28 @@ class Client:
         user = await self.http.login(token)
         self._robot = Robot(user)
         self._transport_state.robot = self._robot
+
+        if self.configuration.enabled:
+            try:
+                result = await self.configuration.sync()
+                _log.info(
+                    "[botpy] 声明式配置同步完成: menu_changed=%s, panels_created=%s, "
+                    "panels_updated=%s, panel_targets_changed=%s",
+                    result.menu_changed,
+                    result.panels_created,
+                    result.panels_updated,
+                    result.panel_targets_changed,
+                )
+            except asyncio.CancelledError:
+                await self.configuration.close()
+                raise
+            except Exception as exc:
+                if self._config_sync_strict:
+                    await self.http.close()
+                    self._robot = None
+                    self._transport_state.robot = None
+                    raise
+                _log.warning("[botpy] 声明式配置同步失败，客户端将继续启动: %s", exc)
 
         if not use_gateway:
             return
