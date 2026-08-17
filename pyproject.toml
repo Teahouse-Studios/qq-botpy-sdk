@@ -1,6 +1,6 @@
 [project]
 name = "qq-botpy-sdk"
-version = "2.0.2"
+version = "2.0.3"
 description = "Community-maintained async Python SDK for the QQ Bot Open Platform"
 authors = [{ name = "Teahouse Studios" }]
 readme = "README.md"

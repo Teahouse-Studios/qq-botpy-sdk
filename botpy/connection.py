@@ -230,7 +230,7 @@ class ConnectionState:
         _message = C2CMessage(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("c2c_message_create", _message)
 
-
+    # botpy.flags.Intents.group_member_event
     def parse_group_member_add(self, payload):
         _event = GroupMemberEvent(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("group_member_add", _event)
@@ -239,6 +239,7 @@ class ConnectionState:
         _event = GroupMemberEvent(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("group_member_remove", _event)
 
+    # botpy.flags.Intents.public_messages
     def parse_group_add_robot(self, payload):
         _event = GroupManageEvent(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("group_add_robot", _event)

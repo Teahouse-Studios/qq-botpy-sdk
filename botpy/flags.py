@@ -105,6 +105,7 @@ class Flag:
 class Intents(BaseFlags):
     """
     public_messages 群/C2C公域消息事件
+    group_member_event 群成员事件
     public_guild_messages	公域消息事件
     guild_messages	消息事件 (仅 私域 机器人能够设置此 intents)
     direct_message	私信事件
@@ -140,6 +141,7 @@ class Intents(BaseFlags):
         self.guild_message_reactions = True
         self.direct_message = True
         self.message_audit = True
+        self.group_member_event = True
         self.public_messages = True
         self.public_guild_messages = True
         self.audio_or_live_channel_member = True
@@ -319,8 +321,20 @@ class Intents(BaseFlags):
         return 1 << 18
 
     @Flag
+    def group_member_event(self):
+        """:class:`bool`: 是否打开群成员事件的监听.
+
+        通过增加`client`的`on_xx`事件可以获取事件下发的数据:
+
+        - :func:`on_group_member_add`                   // 群成员加入
+        - :func:`on_group_member_remove`                // 群成员退出或被移出
+
+        """
+        return 1 << 24
+
+    @Flag
     def public_messages(self):
-        """:class:`bool`: 是否打开公域群/C2C消息事件的监听.
+        """:class:`bool`: 是否打开公域群/C2C消息及管理事件的监听.
 
         通过增加`client`的`on_xx`事件可以获取事件下发的数据:
 
@@ -330,8 +344,6 @@ class Intents(BaseFlags):
         - :func:`on_group_del_robot`                    // 机器人退出群聊
         - :func:`on_group_msg_reject`                   // 群聊拒绝机器人主动消息
         - :func:`on_group_msg_receive`                  // 群聊接受机器人主动消息
-        - :func:`on_group_member_add`                   // 群成员加入
-        - :func:`on_group_member_remove`                // 群成员退出或被移出
         - :func:`on_group_join_request`                 // 用户申请加入群聊
         - :func:`on_friend_add`                         // 用户添加机器人
         - :func:`on_friend_del`                         // 用户删除机器人

@@ -100,21 +100,21 @@ await client.api.execute_group_join_approval_strategy(strategy_id)
 
 ## 群事件
 
-以下事件都使用 `GROUP_AND_C2C_EVENT (1 << 25)`：
+群机器人管理和入群申请事件使用 `GROUP_AND_C2C_EVENT (1 << 25)`，群成员加入、退出事件使用 `GROUP_MEMBER_EVENT (1 << 24)`：
 
 ```python
-intents = botpy.Intents(public_messages=True)
+intents = botpy.Intents(public_messages=True, group_member_event=True)
 ```
 
-| 回调 | 事件对象 |
-| --- | --- |
-| `on_group_add_robot` | `GroupManageEvent` |
-| `on_group_del_robot` | `GroupManageEvent` |
-| `on_group_msg_receive` | `GroupManageEvent` |
-| `on_group_msg_reject` | `GroupManageEvent` |
-| `on_group_member_add` | `GroupMemberEvent` |
-| `on_group_member_remove` | `GroupMemberEvent` |
-| `on_group_join_request` | `GroupJoinRequestEvent` |
+| 回调 | 事件对象 | Intent |
+| --- | --- | --- |
+| `on_group_add_robot` | `GroupManageEvent` | `public_messages` |
+| `on_group_del_robot` | `GroupManageEvent` | `public_messages` |
+| `on_group_msg_receive` | `GroupManageEvent` | `public_messages` |
+| `on_group_msg_reject` | `GroupManageEvent` | `public_messages` |
+| `on_group_member_add` | `GroupMemberEvent` | `group_member_event` |
+| `on_group_member_remove` | `GroupMemberEvent` | `group_member_event` |
+| `on_group_join_request` | `GroupJoinRequestEvent` | `public_messages` |
 
 ```python
 from botpy.manage import GroupJoinRequestEvent, GroupMemberEvent

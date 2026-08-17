@@ -45,9 +45,10 @@ class MyClient(botpy.Client):
 if __name__ == "__main__":
     # 通过预设置的类型，设置需要监听的事件通道
     # intents = botpy.Intents.none()
-    # intents.public_messages=True
+    # intents.public_messages = True
+    # intents.group_member_event = True
 
     # 通过kwargs，设置需要监听的事件通道
-    intents = botpy.Intents(public_messages=True)
+    intents = botpy.Intents(public_messages=True, group_member_event=True)
     client = MyClient(intents=intents)
     client.run(appid=test_config["appid"], secret=test_config["secret"])
