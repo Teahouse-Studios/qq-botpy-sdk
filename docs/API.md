@@ -69,6 +69,7 @@ POST/PATCH 默认不重试。只有确认接口具有幂等语义时，才传 `r
 
 ```python
 info = await client.api.get_group_info(group_openid)
+bot_state = await client.api.get_group_bot_state(group_openid)
 requests = await client.api.get_group_join_requests(group_openid, limit=20)
 mute_setting = await client.api.get_group_mute_setting(group_openid)
 strategies = await client.api.get_group_join_approval_strategies(limit=20)

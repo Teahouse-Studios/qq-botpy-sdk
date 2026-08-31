@@ -22,6 +22,21 @@
 | `execute_group_join_approval_strategy()` | 对关联群执行全量扫描 |
 | `update_group_join_approval_whitelist()` | 增删策略白名单 QQ 号码 |
 
+## 群基本信息与机器人状态
+
+```python
+info = await client.api.get_group_info(group_openid)
+print(info["group_name"], info["group_member_num"], info["group_tags"])
+
+state = await client.api.get_group_bot_state(group_openid)
+print(state["member_openid"], state["joined_at"], state["member_role"])
+```
+
+`joined_at` 为 RFC3339 时间字符串。`recv_msg_setting` 可能为 `all`、`only_mention`
+或 `mention_and_context`；`member_role` 可能为 `member`、`owner` 或 `admin`。
+
+这两个接口的频率限制均为 30 QPM，且仅对具备白名单权限的机器人开放。无权限时平台可能返回错误码 `11253`。
+
 ## 入群申请
 
 ```python

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-from typing import List, TypedDict, Union
+from typing import List, Literal, TypedDict, Union
+
+
+GroupRecvMsgSetting = Literal["all", "only_mention", "mention_and_context"]
+GroupMemberRole = Literal["member", "owner", "admin"]
 
 
 class GroupInfo(TypedDict):
@@ -15,8 +19,8 @@ class GroupBotState(TypedDict):
     member_openid: str
     joined_at: str
     allow_proactive_msg: bool
-    recv_msg_setting: str
-    member_role: str
+    recv_msg_setting: GroupRecvMsgSetting
+    member_role: GroupMemberRole
 
 
 class ReviewQA(TypedDict):
