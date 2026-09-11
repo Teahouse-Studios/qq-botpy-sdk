@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import tempfile
 import unittest
@@ -6,7 +7,17 @@ from unittest.mock import patch
 
 from botpy.api import BotAPI
 from botpy.client import Client
-from botpy.protocol import MediaFileType, MediaSendResult, MessageType, ReplyLimiter, ReplyTarget, UploadCache
+from botpy.connection import ConnectionSession
+from botpy.flags import Intents
+from botpy.protocol import (
+    MediaFileType,
+    MediaSendResult,
+    MessageType,
+    ReplyLimiter,
+    ReplyTarget,
+    TransportError,
+    UploadCache,
+)
 
 
 class RecordingApi:
@@ -52,6 +63,171 @@ def make_client(api=None):
 
 
 class UniversalMessageTests(unittest.IsolatedAsyncioTestCase):
+    def test_gateway_send_timeout_must_be_finite(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                Client(Intents.none(), bot_log=None, gateway_send_timeout=value)
+
+    async def test_send_waits_for_all_gateway_shards_to_resume(self):
+        client = Client(Intents.none(), bot_log=None, gateway_send_timeout=1)
+        http = type(
+            "RecordingApiHttp",
+            (),
+            {
+                "calls": [],
+                "request": self._record_http_request,
+            },
+        )()
+        client.api._http = http
+        pool = ConnectionSession(
+            max_async=2,
+            connect=lambda session: None,
+            dispatch=lambda *args: None,
+            loop=asyncio.get_running_loop(),
+        )
+        first = {"shards": {"shard_id": 0, "shard_count": 2}}
+        second = {"shards": {"shard_id": 1, "shard_count": 2}}
+        pool.add(first)
+        pool.add(second)
+        pool.mark_ready(first)
+        client._connection = pool
+
+        sending = asyncio.create_task(client.send_markdown(ReplyTarget(scope="group", target_id="group"), "# queued"))
+        await asyncio.sleep(0)
+        self.assertFalse(sending.done())
+        self.assertEqual([], http.calls)
+
+        pool.mark_ready(second)
+        result = await sending
+
+        self.assertEqual({"id": "sent"}, result)
+        self.assertEqual(1, len(http.calls))
+
+    async def test_send_does_not_log_reconnect_wait_when_gateway_is_ready(self):
+        client = Client(Intents.none(), bot_log=None, gateway_send_timeout=1)
+        http = type(
+            "RecordingApiHttp",
+            (),
+            {
+                "calls": [],
+                "request": self._record_http_request,
+            },
+        )()
+        client.api._http = http
+        pool = ConnectionSession(
+            max_async=1,
+            connect=lambda session: None,
+            dispatch=lambda *args: None,
+            loop=asyncio.get_running_loop(),
+        )
+        shard = {"shards": {"shard_id": 0, "shard_count": 1}}
+        pool.add(shard)
+        pool.mark_ready(shard)
+        client._connection = pool
+
+        with patch("botpy.client._log.info") as info:
+            result = await client.send_markdown(
+                ReplyTarget(scope="group", target_id="group"),
+                "# ready",
+            )
+
+        self.assertEqual({"id": "sent"}, result)
+        info.assert_not_called()
+
+    async def test_send_waits_while_gateway_pool_is_being_created(self):
+        client = Client(Intents.none(), bot_log=None, gateway_send_timeout=1)
+        http = type(
+            "RecordingApiHttp",
+            (),
+            {
+                "calls": [],
+                "request": self._record_http_request,
+            },
+        )()
+        client.api._http = http
+        client._gateway_starting = True
+        client._gateway_connection_created.clear()
+
+        sending = asyncio.create_task(client.send_markdown(ReplyTarget(scope="group", target_id="group"), "# starting"))
+        await asyncio.sleep(0)
+        self.assertFalse(sending.done())
+        self.assertEqual([], http.calls)
+
+        pool = ConnectionSession(
+            max_async=1,
+            connect=lambda session: None,
+            dispatch=lambda *args: None,
+            loop=asyncio.get_running_loop(),
+        )
+        shard = {"shards": {"shard_id": 0, "shard_count": 1}}
+        pool.add(shard)
+        pool.mark_ready(shard)
+        client._connection = pool
+        client._gateway_starting = False
+        client._gateway_connection_created.set()
+
+        result = await sending
+
+        self.assertEqual({"id": "sent"}, result)
+        self.assertEqual(1, len(http.calls))
+
+    async def test_send_fails_before_http_when_gateway_wait_times_out(self):
+        client = Client(Intents.none(), bot_log=None, gateway_send_timeout=0)
+        pool = ConnectionSession(
+            max_async=1,
+            connect=lambda session: None,
+            dispatch=lambda *args: None,
+            loop=asyncio.get_running_loop(),
+        )
+        pool.add({"shards": {"shard_id": 0, "shard_count": 1}})
+        client._connection = pool
+
+        with self.assertRaises(TransportError) as caught:
+            await client.send_markdown(ReplyTarget(scope="group", target_id="group"), "# queued")
+
+        self.assertEqual(0, caught.exception.attempts)
+        self.assertIn("消息尚未发送", str(caught.exception))
+
+    async def test_client_close_wakes_indefinite_gateway_send_wait(self):
+        client = Client(Intents.none(), bot_log=None, gateway_send_timeout=None)
+        pool = ConnectionSession(
+            max_async=1,
+            connect=lambda session: None,
+            dispatch=lambda *args: None,
+            loop=asyncio.get_running_loop(),
+        )
+        pool.add({"shards": {"shard_id": 0, "shard_count": 1}})
+        client._connection = pool
+        sending = asyncio.create_task(client.send_markdown(ReplyTarget(scope="group", target_id="group"), "# queued"))
+        await asyncio.sleep(0)
+
+        await client.close()
+
+        with self.assertRaises(RuntimeError):
+            await asyncio.wait_for(sending, timeout=1)
+
+    async def test_closed_ready_client_cannot_send_or_reopen_http(self):
+        client = Client(Intents.none(), bot_log=None)
+        pool = ConnectionSession(
+            max_async=1,
+            connect=lambda session: None,
+            dispatch=lambda *args: None,
+            loop=asyncio.get_running_loop(),
+        )
+        shard = {"shards": {"shard_id": 0, "shard_count": 1}}
+        pool.add(shard)
+        pool.mark_ready(shard)
+        client._connection = pool
+        await client.close()
+
+        with self.assertRaises(RuntimeError):
+            await client.send_markdown(ReplyTarget(scope="group", target_id="group"), "# closed")
+
+    @staticmethod
+    async def _record_http_request(http, route, **kwargs):
+        http.calls.append((route, kwargs))
+        return {"id": "sent"}
+
     async def test_send_infers_message_types_and_increments_reply_sequence(self):
         dummy = make_client()
         target = ReplyTarget(
@@ -206,7 +382,7 @@ class MediaMessageTests(unittest.IsolatedAsyncioTestCase):
                 ReplyTarget(scope="group", target_id="group"),
                 MediaFileType.FILE,
                 local_path=local_path,
-                file_name='bad/name?.txt',
+                file_name="bad/name?.txt",
             )
 
         payload = dummy.api.calls[0][2]

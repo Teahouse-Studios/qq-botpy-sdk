@@ -7,7 +7,8 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10,<4.0"
 dependencies = [
-    "aiohttp>=3.14.3,<4",
+    "httpx>=0.28.1,<1",
+    "httpx-ws>=0.7.2,<1",
     "APScheduler>=3.11.3,<4",
     "cryptography>=50.0.0,<51",
     "PyYAML>=6.0.3,<7",
@@ -29,12 +30,15 @@ Homepage = "https://github.com/Teahouse-Studios/qq-botpy-sdk"
 Repository = "https://github.com/Teahouse-Studios/qq-botpy-sdk"
 Issues = "https://github.com/Teahouse-Studios/qq-botpy-sdk/issues"
 
-[tool.poetry]
-packages = [{ include = "botpy" }]
-
-[tool.poetry.group.dev.dependencies]
-pre-commit = { version = "^4.6.1", python = ">=3.10" }
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.1,<5",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.11.9,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "botpy"
+module-root = ""

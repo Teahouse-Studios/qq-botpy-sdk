@@ -29,7 +29,7 @@ class ReconnectPolicyTests(unittest.TestCase):
         self.assertTrue(auth.refresh_token)
         self.assertFalse(auth.clear_session)
         self.assertTrue(invalid_session.clear_session)
-        self.assertTrue(invalid_session.refresh_token)
+        self.assertFalse(invalid_session.refresh_token)
         self.assertEqual(RATE_LIMIT_DELAY, rate_limited.reconnect_delay)
         self.assertTrue(fatal.fatal)
         self.assertFalse(fatal.should_reconnect)

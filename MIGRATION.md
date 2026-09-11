@@ -5,9 +5,10 @@
 ## 运行环境与依赖
 
 - 独立维护版发布包名为 `qq-botpy-sdk`，Python 导入名仍为 `botpy`。
-- 最低 Python 版本为 3.10；这是最新 `aiohttp 3.14.x` 的最低版本要求。
+- 最低 Python 版本仍为 3.10；HTTP 客户端由 `httpx` 提供，Gateway WebSocket 由 `httpx-ws` 提供。
 - `cryptography` 现在是 Webhook Ed25519 签名校验所需的正式运行时依赖。
-- Poetry、`setup.py` 和 `requirements.txt` 使用同一组依赖范围。
+- uv 通过 `pyproject.toml` 管理依赖；首次执行 `uv sync` 会生成用于复现开发环境的 `uv.lock`。
+- Webhook 默认使用无额外框架依赖的 `AsyncioWebhookServer`；旧的 `AiohttpWebhookServer` 名称仍作为兼容别名保留。
 
 ## Gateway 与生命周期
 
@@ -15,6 +16,8 @@
   `Client(ssl=ssl_context)` 显式配置。
 - Gateway 会依据关闭码选择 Resume、Identify、刷新 token、退避重连或停止；致命关闭码不会无限重试。
 - 心跳必须收到 Opcode 11 ACK。超过一个心跳周期未确认时会主动断开并恢复连接。
+- WebSocket 模式下，消息发送会在连接或重连期间等待所有分片 READY/RESUMED。
+  `gateway_send_timeout` 默认为 30 秒，`None` 表示一直等待；首次请求前超时时 HTTP 请求尚未发出。
 - `Client.close()` 会关闭事件传输、流式会话、WebSocket、Session Store、Token 和 HTTP Session。
 
 ## HTTP 请求
@@ -22,8 +25,12 @@
 - HTTP 错误现在携带状态码、平台错误码、trace id、请求方法、URL、响应体和 `Retry-After`。
 - 默认只自动重试 GET、HEAD、OPTIONS、PUT 和 DELETE。POST/PATCH 不会自动重试，避免消息等
   非幂等接口在网络抖动时重复执行。
+- 常规 C2C/群聊消息中，仅携带 `msg_id` 的被动回复会在不确定的传输失败后重试一次；
+  主动消息仍不重试。
 - 已确认可安全重复的分片上传 prepare/finish/complete 流程会显式开启 POST 重试。
 - 401 会强制刷新一次 access token 后重试一次原请求。
+- `TransportError` 保留 `method`、`url`、原始 `cause` 和 `attempts`；`attempts=0` 表示请求未发出，
+  重试前等待 Gateway 超时则保留此前的实际请求次数。
 - 登录成功后会启动后台 token 提前刷新循环，长时间没有 HTTP 流量时也能保证后续 Gateway 重连使用新 token。
 - 消息和媒体 payload 会过滤值为 `None` 的字段。
 

@@ -4,23 +4,27 @@ import logging
 import time
 import unittest
 
-import aiohttp
+import httpx
 
-from botpy.errors import NotFoundError
+from botpy.api import BotAPI
+from botpy.connection import ConnectionSession
+from botpy.errors import NotFoundError, ServerError
+from botpy.flags import Intents
 from botpy.http import BotHttp, Route
-from botpy.protocol import ApiClient, ApiError, ReplyTarget, TokenManager
+from botpy.client import Client
+from botpy.protocol import ApiClient, ApiError, ReplyLimiter, ReplyTarget, TokenManager, TransportError
 
 
 class FakeResponse:
     def __init__(self, status=200, payload=None, headers=None, delay=0):
         self.status = status
+        self.status_code = status
         self.payload = payload
         self.headers = headers or {}
         self.delay = delay
 
-    async def text(self):
-        if self.delay:
-            await asyncio.sleep(self.delay)
+    @property
+    def text(self):
         if self.payload is None:
             return ""
         if isinstance(self.payload, str):
@@ -35,7 +39,19 @@ class FakeRequestContext:
     async def __aenter__(self):
         if isinstance(self.result, BaseException):
             raise self.result
+        if getattr(self.result, "delay", 0):
+            await asyncio.sleep(self.result.delay)
         return self.result
+
+    def __await__(self):
+        async def resolve():
+            if isinstance(self.result, BaseException):
+                raise self.result
+            if getattr(self.result, "delay", 0):
+                await asyncio.sleep(self.result.delay)
+            return self.result
+
+        return resolve().__await__()
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         return False
@@ -46,6 +62,10 @@ class FakeSession:
         self.responses = list(responses)
         self.calls = []
         self.closed = False
+
+    @property
+    def is_closed(self):
+        return self.closed
 
     def post(self, url, **kwargs):
         kwargs = dict(kwargs)
@@ -72,14 +92,15 @@ class FakeTokenProvider:
         self.calls = 0
         self.force_refresh_calls = 0
         self.tokens = list(tokens or ["access-token"])
+        self.current_token = self.tokens.pop(0)
 
     async def get_access_token(self, force_refresh=False):
         self.calls += 1
         if force_refresh:
             self.force_refresh_calls += 1
-        if len(self.tokens) > 1:
-            return self.tokens.pop(0)
-        return self.tokens[0]
+            if self.tokens:
+                self.current_token = self.tokens.pop(0)
+        return self.current_token
 
 
 class LegacyTokenProvider(FakeTokenProvider):
@@ -95,9 +116,7 @@ class LegacyTokenProvider(FakeTokenProvider):
 
 class TokenManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_token_requests_are_singleflight(self):
-        session = FakeSession(
-            [FakeResponse(payload={"access_token": "token", "expires_in": "7200"}, delay=0.02)]
-        )
+        session = FakeSession([FakeResponse(payload={"access_token": "token", "expires_in": "7200"}, delay=0.02)])
         manager = TokenManager("app", "secret", session=session)
 
         tokens = await asyncio.gather(*(manager.get_access_token() for _ in range(10)))
@@ -138,6 +157,26 @@ class TokenManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first.done())
         await manager.close()
         self.assertTrue(first.done())
+
+    async def test_concurrent_stale_token_refreshes_are_singleflight(self):
+        session = FakeSession([FakeResponse(payload={"access_token": "fresh", "expires_in": "7200"}, delay=0.02)])
+        manager = TokenManager("app", "secret", session=session)
+        manager.set_cached_token("stale", time.time() + 3600)
+
+        tokens = await asyncio.gather(*(manager.refresh_access_token("stale") for _ in range(10)))
+
+        self.assertEqual(["fresh"] * 10, tokens)
+        self.assertEqual(1, len(session.calls))
+
+    async def test_closed_token_manager_cannot_reopen_session(self):
+        session = FakeSession([])
+        manager = TokenManager("app", "secret", session=session)
+        await manager.close()
+
+        with self.assertRaises(RuntimeError):
+            await manager.get_access_token()
+
+        self.assertEqual([], session.calls)
 
 
 class ApiClientTests(unittest.IsolatedAsyncioTestCase):
@@ -210,12 +249,25 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
             delays.append(delay)
 
         provider = FakeTokenProvider()
-        session = FakeSession(
-            [aiohttp.ClientConnectionError("reset"), FakeResponse(payload={"ok": True})]
-        )
+        session = FakeSession([httpx.NetworkError("reset"), FakeResponse(payload={"ok": True})])
         client = ApiClient(provider, session=session, sleep=record_sleep)
 
         result = await client.get("/retry")
+
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(2, len(session.calls))
+        self.assertEqual([0.5], delays)
+
+    async def test_post_retries_connection_failure_before_request_is_sent(self):
+        delays = []
+
+        async def record_sleep(delay):
+            delays.append(delay)
+
+        session = FakeSession([httpx.ConnectTimeout("connect timeout"), FakeResponse(payload={"ok": True})])
+        client = ApiClient(FakeTokenProvider(), session=session, sleep=record_sleep)
+
+        result = await client.post("/messages", json_body={"content": "hello"})
 
         self.assertEqual({"ok": True}, result)
         self.assertEqual(2, len(session.calls))
@@ -264,13 +316,228 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("QQBot expired-token", session.calls[0][2]["headers"]["Authorization"])
         self.assertEqual("QQBot fresh-token", session.calls[1][2]["headers"]["Authorization"])
 
+    async def test_concurrent_401_responses_share_one_token_refresh(self):
+        provider = FakeTokenProvider(tokens=["expired-token", "fresh-token"])
+        session = FakeSession(
+            [
+                FakeResponse(status=401, payload={"message": "expired"}, delay=0.02),
+                FakeResponse(status=401, payload={"message": "expired"}, delay=0.02),
+                FakeResponse(payload={"ok": 1}),
+                FakeResponse(payload={"ok": 2}),
+            ]
+        )
+        client = ApiClient(provider, session=session, max_retries=0)
+
+        results = await asyncio.gather(client.get("/first"), client.get("/second"))
+
+        self.assertEqual([{"ok": 1}, {"ok": 2}], results)
+        self.assertEqual(1, provider.force_refresh_calls)
+        self.assertEqual(
+            ["QQBot expired-token", "QQBot expired-token"],
+            [call[2]["headers"]["Authorization"] for call in session.calls[:2]],
+        )
+        self.assertEqual(
+            ["QQBot fresh-token", "QQBot fresh-token"],
+            [call[2]["headers"]["Authorization"] for call in session.calls[2:]],
+        )
+
+    async def test_transport_error_counts_request_after_401_retry(self):
+        provider = FakeTokenProvider(tokens=["expired-token", "fresh-token"])
+        session = FakeSession(
+            [
+                FakeResponse(status=401, payload={"message": "expired"}),
+                httpx.RemoteProtocolError("response lost"),
+            ]
+        )
+        client = ApiClient(provider, session=session, max_retries=0)
+
+        with self.assertRaises(TransportError) as caught:
+            await client.post("/messages", json_body={"content": "hello"})
+
+        self.assertEqual(2, caught.exception.attempts)
+
+    async def test_closed_http_client_cannot_reopen_session(self):
+        session = FakeSession([FakeResponse(payload={"ok": True})])
+        client = ApiClient(FakeTokenProvider(), session=session)
+        await client.close()
+
+        with self.assertRaises(RuntimeError):
+            await client.get("/after-close")
+
+        self.assertEqual([], session.calls)
+
+    async def test_close_during_backoff_aborts_retry_with_attempt_count(self):
+        session = FakeSession([httpx.NetworkError("reset"), FakeResponse(payload={"ok": True})])
+        client = None
+
+        async def close_during_backoff(delay):
+            await client.close()
+
+        client = ApiClient(
+            FakeTokenProvider(),
+            session=session,
+            sleep=close_during_backoff,
+        )
+
+        with self.assertRaises(TransportError) as caught:
+            await client.get("/retry")
+
+        self.assertEqual(1, caught.exception.attempts)
+        self.assertEqual(1, len(session.calls))
+
     async def test_unsafe_post_does_not_retry_by_default(self):
         provider = FakeTokenProvider()
-        session = FakeSession([aiohttp.ClientConnectionError("reset")])
+        session = FakeSession([httpx.NetworkError("reset")])
         client = ApiClient(provider, session=session)
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(TransportError) as caught:
             await client.post("/messages", json_body={"content": "hello"})
+
+        self.assertEqual(1, len(session.calls))
+        self.assertEqual("POST", caught.exception.method)
+        self.assertIsInstance(caught.exception.cause, httpx.NetworkError)
+        self.assertEqual(1, caught.exception.attempts)
+        self.assertIn("cause=NetworkError", str(caught.exception))
+
+
+class MessageTransportRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_retry_waits_for_gateway_to_resume(self):
+        retry_started = asyncio.Event()
+        client = Client(Intents.none(), bot_log=None, gateway_send_timeout=1)
+        provider = LegacyTokenProvider()
+        session = FakeSession([httpx.RemoteProtocolError("stale keep-alive"), FakeResponse(payload={"id": "sent"})])
+        pool = ConnectionSession(
+            max_async=1,
+            connect=lambda session: None,
+            dispatch=lambda *args: None,
+            loop=asyncio.get_running_loop(),
+        )
+        shard = {"shards": {"shard_id": 0, "shard_count": 1}}
+        pool.add(shard)
+        pool.mark_ready(shard)
+        client._connection = pool
+
+        async def disconnect_during_backoff(delay):
+            pool.mark_disconnected(shard)
+            retry_started.set()
+
+        http = BotHttp(timeout=5)
+        http._token = provider
+        http._client = ApiClient(provider, session=session, sleep=disconnect_during_backoff)
+        client.http = http
+        client.api._http = http
+        target = ReplyTarget(scope="group", target_id="group", message_id="inbound-message")
+
+        sending = asyncio.create_task(client.send_markdown(target, "# queued"))
+        await retry_started.wait()
+        await asyncio.sleep(0)
+        self.assertFalse(sending.done())
+        self.assertEqual(1, len(session.calls))
+
+        pool.mark_ready(shard)
+        result = await sending
+
+        self.assertEqual({"id": "sent"}, result)
+        self.assertEqual(2, len(session.calls))
+        await client.close()
+
+    async def test_gateway_timeout_after_transport_failure_keeps_attempt_count(self):
+        client = Client(Intents.none(), bot_log=None, gateway_send_timeout=0)
+        provider = LegacyTokenProvider()
+        session = FakeSession([httpx.RemoteProtocolError("response lost")])
+        pool = ConnectionSession(
+            max_async=1,
+            connect=lambda session: None,
+            dispatch=lambda *args: None,
+            loop=asyncio.get_running_loop(),
+        )
+        shard = {"shards": {"shard_id": 0, "shard_count": 1}}
+        pool.add(shard)
+        pool.mark_ready(shard)
+        client._connection = pool
+
+        async def disconnect_during_backoff(delay):
+            pool.mark_disconnected(shard)
+
+        http = BotHttp(timeout=5)
+        http._token = provider
+        http._client = ApiClient(provider, session=session, sleep=disconnect_during_backoff)
+        client.http = http
+        client.api._http = http
+        target = ReplyTarget(scope="group", target_id="group", message_id="inbound-message")
+
+        with self.assertRaises(TransportError) as caught:
+            await client.send_markdown(target, "# queued")
+
+        self.assertEqual(1, caught.exception.attempts)
+        self.assertIn("retry aborted", str(caught.exception))
+        self.assertEqual(1, len(session.calls))
+        await client.close()
+
+    async def test_passive_group_markdown_retries_stale_connection_once(self):
+        delays = []
+
+        async def record_sleep(delay):
+            delays.append(delay)
+
+        provider = LegacyTokenProvider()
+        session = FakeSession([httpx.RemoteProtocolError("stale keep-alive"), FakeResponse(payload={"id": "sent"})])
+        http = BotHttp(timeout=5)
+        http._token = provider
+        http._client = ApiClient(provider, session=session, sleep=record_sleep)
+        limiter = ReplyLimiter()
+        dummy = type("DummyClient", (), {"api": BotAPI(http), "_reply_limiter": limiter})()
+        target = ReplyTarget(
+            scope="group",
+            target_id="group",
+            message_id="inbound-message",
+            event_id="event",
+        )
+
+        result = await Client.send_markdown(dummy, target, "# hello")
+
+        self.assertEqual({"id": "sent"}, result)
+        self.assertEqual(2, len(session.calls))
+        self.assertEqual([0.5], delays)
+        first_method, first_url, first_kwargs = session.calls[0]
+        second_method, second_url, second_kwargs = session.calls[1]
+        self.assertEqual((first_method, first_url), (second_method, second_url))
+        self.assertEqual(first_kwargs["json"], second_kwargs["json"])
+        self.assertEqual("inbound-message", first_kwargs["json"]["msg_id"])
+        self.assertEqual(1, first_kwargs["json"]["msg_seq"])
+        self.assertEqual({"content": "# hello"}, first_kwargs["json"]["markdown"])
+        self.assertEqual(1, limiter.stats()["total_replies"])
+
+    async def test_proactive_group_message_does_not_retry_ambiguous_disconnect(self):
+        provider = LegacyTokenProvider()
+        session = FakeSession([httpx.RemoteProtocolError("response lost")])
+        http = BotHttp(timeout=5)
+        http._token = provider
+        http._client = ApiClient(provider, session=session)
+
+        with self.assertRaises(TransportError):
+            await BotAPI(http).post_group_message("group", content="hello")
+
+        self.assertEqual(1, len(session.calls))
+
+    async def test_passive_group_message_does_not_replay_server_error(self):
+        provider = LegacyTokenProvider()
+        session = FakeSession(
+            [
+                FakeResponse(status=500, payload={"message": "uncertain commit"}),
+                FakeResponse(payload={"id": "duplicate"}),
+            ]
+        )
+        http = BotHttp(timeout=5)
+        http._token = provider
+        http._client = ApiClient(provider, session=session)
+
+        with self.assertRaises(ServerError):
+            await BotAPI(http).post_group_message(
+                "group",
+                content="hello",
+                msg_id="inbound-message",
+            )
 
         self.assertEqual(1, len(session.calls))
 

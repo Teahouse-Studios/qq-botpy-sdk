@@ -5,8 +5,6 @@ import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Protocol, Union, runtime_checkable
 
-from aiohttp import web
-
 from ..events import parse_gateway_event
 from .base import EventHandler
 from .webhook_verify import sign_validation_response, verify_webhook_signature
@@ -45,18 +43,21 @@ class WebhookServerAdapter(Protocol):
         port: int,
         path: str,
         handler: WebhookRequestHandler,
-    ) -> None: ...
+    ) -> None:
+        ...
 
-    async def close(self) -> None: ...
+    async def close(self) -> None:
+        ...
 
 
-class AiohttpWebhookServer:
-    """基于项目现有 aiohttp 依赖的默认 Webhook HTTP 服务器。"""
+class AsyncioWebhookServer:
+    """基于标准库 asyncio 的轻量 Webhook HTTP 服务器。"""
 
     def __init__(self, *, max_body_size: int = 1024 * 1024) -> None:
         self.max_body_size = max(1, max_body_size)
-        self._runner: Optional[web.AppRunner] = None
-        self._site: Optional[web.TCPSite] = None
+        self._server: Optional[asyncio.AbstractServer] = None
+        self._path = "/"
+        self._handler: Optional[WebhookRequestHandler] = None
         self.bound_port: Optional[int] = None
 
     async def listen(
@@ -66,47 +67,77 @@ class AiohttpWebhookServer:
         path: str,
         handler: WebhookRequestHandler,
     ) -> None:
-        if self._runner is not None:
+        if self._server is not None:
             raise RuntimeError("webhook server is already running")
-
-        application = web.Application(client_max_size=self.max_body_size)
-
-        async def handle_aiohttp_request(request: web.Request) -> web.Response:
-            response = await handler(
-                WebhookRequest(
-                    body=await request.read(),
-                    headers={key.lower(): value for key, value in request.headers.items()},
-                )
-            )
-            headers = {"Content-Type": "application/json", **dict(response.headers)}
-            return web.Response(status=response.status, body=response.body, headers=headers)
-
-        application.router.add_post(path, handle_aiohttp_request)
-        self._runner = web.AppRunner(application)
-        await self._runner.setup()
-        self._site = web.TCPSite(self._runner, host=host, port=port)
+        self._path = path
+        self._handler = handler
         try:
-            await self._site.start()
+            self._server = await asyncio.start_server(self._handle_client, host, port)
         except Exception:
-            await self._runner.cleanup()
-            self._runner = None
-            self._site = None
+            self._handler = None
             raise
-
-        server = getattr(self._site, "_server", None)
-        sockets = getattr(server, "sockets", None)
+        sockets = self._server.sockets
         if sockets:
             self.bound_port = sockets[0].getsockname()[1]
         else:
             self.bound_port = port
 
     async def close(self) -> None:
-        runner = self._runner
-        self._runner = None
-        self._site = None
+        server = self._server
+        self._server = None
+        self._handler = None
         self.bound_port = None
-        if runner is not None:
-            await runner.cleanup()
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            header_blob = await reader.readuntil(b"\r\n\r\n")
+            if len(header_blob) > self.max_body_size:
+                await self._write_response(writer, WebhookResponse(413, b'{"error":"request too large"}'))
+                return
+            lines = header_blob[:-4].decode("latin-1").split("\r\n")
+            method, request_path, _version = lines[0].split(" ", 2)
+            headers = {}
+            for line in lines[1:]:
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    headers[key.lower()] = value.strip()
+            content_length = int(headers.get("content-length", "0"))
+            if content_length < 0 or content_length > self.max_body_size:
+                await self._write_response(writer, WebhookResponse(413, b'{"error":"request too large"}'))
+                return
+            body = await reader.readexactly(content_length)
+            if method != "POST" or request_path != self._path or self._handler is None:
+                await self._write_response(writer, WebhookResponse(404, b'{"error":"not found"}'))
+                return
+            response = await self._handler(WebhookRequest(body=body, headers=headers))
+            await self._write_response(writer, response)
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, UnicodeDecodeError, ValueError):
+            try:
+                await self._write_response(writer, WebhookResponse(400, b'{"error":"bad request"}'))
+            except (ConnectionError, RuntimeError):
+                pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, RuntimeError):
+                pass
+
+    @staticmethod
+    async def _write_response(writer: asyncio.StreamWriter, response: WebhookResponse) -> None:
+        headers = {"Content-Type": "application/json", **dict(response.headers)}
+        headers["Content-Length"] = str(len(response.body))
+        headers["Connection"] = "close"
+        header_lines = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+        writer.write(f"HTTP/1.1 {response.status} OK\r\n{header_lines}\r\n".encode("latin-1") + response.body)
+        await writer.drain()
+
+
+# Backward-compatible name retained for callers that supplied this adapter explicitly.
+AiohttpWebhookServer = AsyncioWebhookServer
 
 
 class WebhookTransport:
@@ -137,7 +168,7 @@ class WebhookTransport:
         self.host = host
         self.port = port
         self.path = path
-        self.server = server or AiohttpWebhookServer()
+        self.server = server or AsyncioWebhookServer()
         self._logger = logger or logging.getLogger("botpy.protocol.webhook")
         self._on_started = on_started
         self._on_error = on_error

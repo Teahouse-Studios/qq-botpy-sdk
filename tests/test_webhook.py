@@ -2,7 +2,7 @@ import asyncio
 import json
 import unittest
 
-from aiohttp import ClientSession
+import httpx
 
 from botpy.client import Client
 from botpy.flags import Intents
@@ -176,7 +176,7 @@ class WebhookTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server.closed)
         self.assertEqual(1, server.close_count)
 
-    async def test_aiohttp_server_listens_on_configured_path(self):
+    async def test_asyncio_server_listens_on_configured_path(self):
         await self.transport.close()
         await self.start_task
 
@@ -206,13 +206,12 @@ class WebhookTransportTests(unittest.IsolatedAsyncioTestCase):
                 "op": 13,
                 "d": {"plain_token": "plain-token", "event_ts": "1725442341"},
             }
-            async with ClientSession() as session:
-                async with session.post(url, json=payload) as response:
-                    body = await response.json()
-
-                self.assertEqual(200, response.status)
+            async with httpx.AsyncClient() as session:
+                response = await session.post(url, json=payload)
+                body = response.json()
+                self.assertEqual(200, response.status_code)
                 self.assertEqual("plain-token", body["plain_token"])
-                self.assertEqual("application/json", response.content_type)
+                self.assertEqual("application/json", response.headers.get("content-type", "").split(";", 1)[0])
         finally:
             await transport.close()
             await start_task
@@ -236,9 +235,7 @@ class WebhookTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_invalid_json_and_missing_or_bad_signature(self):
         invalid_json = await self.server.invoke(WebhookRequest(body=b"{"))
-        missing = await self.server.invoke(
-            WebhookRequest(body=b'{"op":0,"t":"TEST","d":{}}')
-        )
+        missing = await self.server.invoke(WebhookRequest(body=b'{"op":0,"t":"TEST","d":{}}'))
         bad_signature = await self.server.invoke(
             WebhookRequest(
                 body=b'{"op":0,"t":"TEST","d":{}}',
@@ -289,9 +286,7 @@ class WebhookTransportTests(unittest.IsolatedAsyncioTestCase):
         self.start_task = asyncio.create_task(self.transport.start(slow_handler))
         await self.server.started.wait()
 
-        response = await self.server.invoke(
-            make_signed_request({"op": 0, "t": "FUTURE_EVENT", "d": {}})
-        )
+        response = await self.server.invoke(make_signed_request({"op": 0, "t": "FUTURE_EVENT", "d": {}}))
         await started.wait()
 
         self.assertEqual(200, response.status)

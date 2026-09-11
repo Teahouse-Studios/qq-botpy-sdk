@@ -1,6 +1,6 @@
 import asyncio
 import inspect
-from typing import List, Callable, Dict, Any, Optional
+from typing import List, Callable, Dict, Any, Mapping, Optional
 
 from .channel import Channel
 from .guild import Guild
@@ -44,6 +44,12 @@ class ConnectionSession:
         self.loop: asyncio.AbstractEventLoop = asyncio.get_event_loop() if loop is None else loop
         # session链接同时最大并发数
         self._session_list: List[tuple[session.Session, bool]] = []
+        self._registered_shards: set[int] = set()
+        self._ready_shards: set[int] = set()
+        self._gateway_owners: Dict[int, object] = {}
+        self._gateway_ready = asyncio.Event()
+        self._closed = False
+        self._running_tasks: set[asyncio.Task] = set()
 
     async def multi_run(self, session_interval=5):
         if len(self._session_list) == 0:
@@ -51,44 +57,149 @@ class ConnectionSession:
         max_async = max(1, self._max_async)
         running = set()
 
-        # 连接任务通常会长期运行。使用 FIRST_COMPLETED 才能在某个分片断开时，
-        # 立即消费 on_closed 放回队列的 session，而不是等待其他所有分片也断开。
-        while self._session_list or running:
-            while self._session_list:
-                batch = []
-                for _ in range(min(max_async, len(self._session_list))):
-                    batch.append(self._session_list.pop(0))
+        try:
+            # 连接任务通常会长期运行。使用 FIRST_COMPLETED 才能在某个分片断开时，
+            # 立即消费 on_closed 放回队列的 session，而不是等待其他所有分片也断开。
+            while self._session_list or running:
+                while self._session_list:
+                    batch = []
+                    for _ in range(min(max_async, len(self._session_list))):
+                        batch.append(self._session_list.pop(0))
 
-                _log.info("[botpy] 最大并发连接数: %s, 启动会话数: %s" % (max_async, len(batch)))
-                for current_session, _is_reconnect in batch:
-                    running.add(
-                        asyncio.ensure_future(self._runner(current_session), loop=self.loop)
-                    )
+                    _log.info("[botpy] 最大并发连接数: %s, 启动会话数: %s" % (max_async, len(batch)))
+                    for current_session, _is_reconnect in batch:
+                        if self._closed:
+                            break
+                        task = asyncio.ensure_future(self._runner(current_session), loop=self.loop)
+                        running.add(task)
+                        self._running_tasks.add(task)
 
-                # 网关限制的是单位时间内的启动次数，不是同时保持的连接数。
-                if self._session_list and session_interval > 0:
+                    # 网关限制的是单位时间内的启动次数，不是同时保持的连接数。
+                    if self._session_list and session_interval > 0:
+                        await asyncio.sleep(session_interval)
+
+                if not running:
+                    continue
+
+                done, running = await asyncio.wait(
+                    running,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    self._running_tasks.discard(task)
+                    # 读取结果，避免任务异常被静默丢弃。
+                    if not task.cancelled():
+                        task.result()
+
+                has_initial_session = any(not is_reconnect for _session, is_reconnect in self._session_list)
+                if self._session_list and has_initial_session and session_interval > 0:
                     await asyncio.sleep(session_interval)
-
-            if not running:
-                continue
-
-            done, running = await asyncio.wait(
-                running,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in done:
-                # 读取结果，避免任务异常被静默丢弃。
-                task.result()
-
-            has_initial_session = any(not is_reconnect for _session, is_reconnect in self._session_list)
-            if self._session_list and has_initial_session and session_interval > 0:
-                await asyncio.sleep(session_interval)
+        finally:
+            for task in running:
+                if not task.done():
+                    task.cancel()
+            if running:
+                await asyncio.gather(*running, return_exceptions=True)
+            self._running_tasks.difference_update(running)
 
     async def _runner(self, session):
         await self._connect(session)
 
     def add(self, _session: session.Session, *, is_reconnect: bool = False):
+        if self._closed:
+            return
+        shard_id, shard_count = self._shard_identity(_session)
+        if shard_count is not None:
+            self._registered_shards.update(range(shard_count))
+        elif shard_id is not None:
+            self._registered_shards.add(shard_id)
         self._session_list.append((_session, is_reconnect))
+
+    @property
+    def is_ready(self) -> bool:
+        """所有已注册 Gateway 分片是否均已 READY/RESUMED。"""
+
+        return not self._closed and self._gateway_ready.is_set()
+
+    def claim_gateway(self, _session: session.Session, owner: object) -> bool:
+        """将分片状态绑定到最新的 WebSocket，忽略旧连接的迟到回调。"""
+
+        shard_id, _ = self._shard_identity(_session)
+        if shard_id is None or self._closed:
+            return False
+        self._gateway_owners[shard_id] = owner
+        self._ready_shards.discard(shard_id)
+        self._gateway_ready.clear()
+        return True
+
+    def mark_ready(self, _session: session.Session, *, owner: Optional[object] = None) -> bool:
+        shard_id, _ = self._shard_identity(_session)
+        if shard_id is None or self._closed or not self._is_current_owner(shard_id, owner):
+            return False
+        self._registered_shards.add(shard_id)
+        self._ready_shards.add(shard_id)
+        if self._registered_shards.issubset(self._ready_shards):
+            self._gateway_ready.set()
+        return True
+
+    def mark_disconnected(self, _session: session.Session, *, owner: Optional[object] = None) -> bool:
+        shard_id, _ = self._shard_identity(_session)
+        if shard_id is None or not self._is_current_owner(shard_id, owner):
+            return False
+        self._ready_shards.discard(shard_id)
+        if not self._closed:
+            self._gateway_ready.clear()
+        return True
+
+    def is_gateway_owner(self, _session: session.Session, owner: object) -> bool:
+        """Return whether ``owner`` still controls this Gateway shard."""
+
+        shard_id, _ = self._shard_identity(_session)
+        return shard_id is not None and not self._closed and self._is_current_owner(shard_id, owner)
+
+    def mark_closed(self) -> None:
+        """终止 Gateway readiness 等待，不允许关闭后的连接重新变为可用。"""
+
+        self._closed = True
+        self._ready_shards.clear()
+        self._session_list.clear()
+        current_task = asyncio.current_task()
+        for task in tuple(self._running_tasks):
+            if task is not current_task and not task.done():
+                task.cancel()
+        # 唤醒无限期等待者；wait_until_ready 会根据 _closed 抛出异常。
+        self._gateway_ready.set()
+
+    async def wait_until_ready(self, timeout: Optional[float] = None) -> None:
+        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+        while not self.is_ready:
+            if self._closed:
+                raise RuntimeError("Gateway connection is closed")
+            if deadline is None:
+                await self._gateway_ready.wait()
+                continue
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            await asyncio.wait_for(self._gateway_ready.wait(), timeout=remaining)
+
+    def _is_current_owner(self, shard_id: int, owner: Optional[object]) -> bool:
+        return owner is None or self._gateway_owners.get(shard_id) is owner
+
+    @staticmethod
+    def _shard_identity(_session: session.Session) -> tuple[Optional[int], Optional[int]]:
+        if not isinstance(_session, Mapping):
+            return None, None
+        shards = _session.get("shards")
+        if not isinstance(shards, Mapping):
+            return None, None
+        shard_id = shards.get("shard_id")
+        shard_count = shards.get("shard_count")
+        if isinstance(shard_id, bool) or not isinstance(shard_id, int) or shard_id < 0:
+            shard_id = None
+        if isinstance(shard_count, bool) or not isinstance(shard_count, int) or shard_count <= 0:
+            shard_count = None
+        return shard_id, shard_count
 
 
 class ConnectionState:
@@ -114,111 +225,111 @@ class ConnectionState:
 
     # botpy.flags.Intents.guilds
     def parse_guild_create(self, payload):
-        _guild = Guild(self.api, payload.get('id', None), payload.get('d', {}))
+        _guild = Guild(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("guild_create", _guild)
 
     def parse_guild_update(self, payload):
-        _guild = Guild(self.api, payload.get('id', None), payload.get('d', {}))
+        _guild = Guild(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("guild_update", _guild)
 
     def parse_guild_delete(self, payload):
-        _guild = Guild(self.api, payload.get('id', None), payload.get('d', {}))
+        _guild = Guild(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("guild_delete", _guild)
 
     def parse_channel_create(self, payload):
-        _channel = Channel(self.api, payload.get('id', None), payload.get('d', {}))
+        _channel = Channel(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("channel_create", _channel)
 
     def parse_channel_update(self, payload):
-        _channel = Channel(self.api, payload.get('id', None), payload.get('d', {}))
+        _channel = Channel(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("channel_update", _channel)
 
     def parse_channel_delete(self, payload):
-        _channel = Channel(self.api, payload.get('id', None), payload.get('d', {}))
+        _channel = Channel(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("channel_delete", _channel)
 
     # botpy.flags.Intents.guild_members
     def parse_guild_member_add(self, payload):
-        _member = Member(self.api, payload.get('id', None), payload.get('d', {}))
+        _member = Member(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("guild_member_add", _member)
 
     def parse_guild_member_update(self, payload):
-        _member = Member(self.api, payload.get('id', None), payload.get('d', {}))
+        _member = Member(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("guild_member_update", _member)
 
     def parse_guild_member_remove(self, payload):
-        _member = Member(self.api, payload.get('id', None), payload.get('d', {}))
+        _member = Member(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("guild_member_remove", _member)
 
     # botpy.flags.Intents.guild_messages
     def parse_message_create(self, payload):
-        _message = Message(self.api, payload.get('id', None), payload.get('d', {}))
+        _message = Message(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("message_create", _message)
 
     def parse_group_message_create(self, payload):
-        _message = GroupMessage(self.api, payload.get('id', None), payload.get('d', {}))
+        _message = GroupMessage(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("message_group_create", _message)
 
     def parse_message_delete(self, payload):
-        _message = Message(self.api, payload.get('id', None), payload.get('d', {}))
+        _message = Message(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("message_delete", _message)
 
     # botpy.flags.Intents.guild_message_reactions
     def parse_message_reaction_add(self, payload):
-        _reaction = Reaction(self.api, payload.get('id', None), payload.get('d', {}))
+        _reaction = Reaction(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("message_reaction_add", _reaction)
 
     def parse_message_reaction_remove(self, payload):
-        _reaction = Reaction(self.api, payload.get('id', None), payload.get('d', {}))
+        _reaction = Reaction(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("message_reaction_remove", _reaction)
 
     # botpy.flags.Intents.direct_message
     def parse_direct_message_create(self, payload):
-        _message = DirectMessage(self.api, payload.get('id', None), payload.get('d', {}))
+        _message = DirectMessage(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("direct_message_create", _message)
 
     def parse_direct_message_delete(self, payload):
-        _message = DirectMessage(self.api, payload.get('id', None), payload.get('d', {}))
+        _message = DirectMessage(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("direct_message_delete", _message)
 
     # botpy.flags.Intents.interaction
     def parse_interaction_create(self, payload):
-        _interaction = Interaction(self.api, payload.get('id', None), payload.get('d', {}))
+        _interaction = Interaction(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("interaction_create", _interaction)
 
     # botpy.flags.Intents.message_audit
     def parse_message_audit_pass(self, payload):
-        _message_audit = MessageAudit(self.api, payload.get('id', None), payload.get('d', {}))
+        _message_audit = MessageAudit(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("message_audit_pass", _message_audit)
 
     def parse_message_audit_reject(self, payload):
-        _message_audit = MessageAudit(self.api, payload.get('id', None), payload.get('d', {}))
+        _message_audit = MessageAudit(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("message_audit_reject", _message_audit)
 
     # botpy.flags.Intents.audio_action
     def parse_audio_start(self, payload):
-        _audio = Audio(self.api, payload.get('id', None), payload.get('d', {}))
+        _audio = Audio(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("audio_start", _audio)
 
     def parse_audio_finish(self, payload):
-        _audio = Audio(self.api, payload.get('id', None), payload.get('d', {}))
+        _audio = Audio(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("audio_finish", _audio)
 
     def parse_on_mic(self, payload):
-        _audio = Audio(self.api, payload.get('id', None), payload.get('d', {}))
+        _audio = Audio(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("on_mic", _audio)
 
     def parse_off_mic(self, payload):
-        _audio = Audio(self.api, payload.get('id', None), payload.get('d', {}))
+        _audio = Audio(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("off_mic", _audio)
 
     # botpy.flags.Intents.public_guild_messages
     def parse_at_message_create(self, payload):
-        _message = Message(self.api, payload.get('id', None), payload.get('d', {}))
+        _message = Message(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("at_message_create", _message)
 
     def parse_public_message_delete(self, payload):
-        _message = Message(self.api, payload.get('id', None), payload.get('d', {}))
+        _message = Message(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("public_message_delete", _message)
 
     # botpy.flags.Intents.public_messages
@@ -278,64 +389,64 @@ class ConnectionState:
 
     # botpy.flags.Intents.forums
     def parse_forum_thread_create(self, payload):
-        _forum = Thread(self.api, payload.get('id', None), payload.get('d', {}))
+        _forum = Thread(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("forum_thread_create", _forum)
 
     def parse_forum_thread_update(self, payload):
-        _forum = Thread(self.api, payload.get('id', None), payload.get('d', {}))
+        _forum = Thread(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("forum_thread_update", _forum)
 
     def parse_forum_thread_delete(self, payload):
-        _forum = Thread(self.api, payload.get('id', None), payload.get('d', {}))
+        _forum = Thread(self.api, payload.get("id", None), payload.get("d", {}))
         self._dispatch("forum_thread_delete", _forum)
 
     def parse_forum_post_create(self, payload):
-        self._dispatch("forum_post_create", payload.get('d', {}))
+        self._dispatch("forum_post_create", payload.get("d", {}))
 
     def parse_forum_post_delete(self, payload):
-        self._dispatch("forum_post_delete", payload.get('d', {}))
+        self._dispatch("forum_post_delete", payload.get("d", {}))
 
     def parse_forum_reply_create(self, payload):
-        self._dispatch("forum_reply_create", payload.get('d', {}))
+        self._dispatch("forum_reply_create", payload.get("d", {}))
 
     def parse_forum_reply_delete(self, payload):
-        self._dispatch("forum_reply_delete", payload.get('d', {}))
+        self._dispatch("forum_reply_delete", payload.get("d", {}))
 
     def parse_forum_publish_audit_result(self, payload):
-        self._dispatch("forum_publish_audit_result", payload.get('d', {}))
+        self._dispatch("forum_publish_audit_result", payload.get("d", {}))
 
     def parse_audio_or_live_channel_member_enter(self, payload):
-        _public_audio = PublicAudio(self.api, payload.get('d', {}))
+        _public_audio = PublicAudio(self.api, payload.get("d", {}))
         self._dispatch("audio_or_live_channel_member_enter", _public_audio)
 
     def parse_audio_or_live_channel_member_exit(self, payload):
-        _public_audio = PublicAudio(self.api, payload.get('d', {}))
+        _public_audio = PublicAudio(self.api, payload.get("d", {}))
         self._dispatch("audio_or_live_channel_member_exit", _public_audio)
 
     def parse_open_forum_thread_create(self, payload):
-        _forum = OpenThread(self.api, payload.get('d', {}))
+        _forum = OpenThread(self.api, payload.get("d", {}))
         self._dispatch("open_forum_thread_create", _forum)
 
     def parse_open_forum_thread_update(self, payload):
-        _forum = OpenThread(self.api, payload.get('d', {}))
+        _forum = OpenThread(self.api, payload.get("d", {}))
         self._dispatch("open_forum_thread_update", _forum)
 
     def parse_open_forum_thread_delete(self, payload):
-        _forum = OpenThread(self.api, payload.get('d', {}))
+        _forum = OpenThread(self.api, payload.get("d", {}))
         self._dispatch("open_forum_thread_delete", _forum)
 
     def parse_open_forum_post_create(self, payload):
-        _forum = OpenThread(self.api, payload.get('d', {}))
-        self._dispatch("open_forum_post_create", payload.get('d', {}))
+        _forum = OpenThread(self.api, payload.get("d", {}))
+        self._dispatch("open_forum_post_create", payload.get("d", {}))
 
     def parse_open_forum_post_delete(self, payload):
-        _forum = OpenThread(self.api, payload.get('d', {}))
-        self._dispatch("open_forum_post_delete", payload.get('d', {}))
+        _forum = OpenThread(self.api, payload.get("d", {}))
+        self._dispatch("open_forum_post_delete", payload.get("d", {}))
 
     def parse_open_forum_reply_create(self, payload):
-        _forum = OpenThread(self.api, payload.get('d', {}))
-        self._dispatch("open_forum_reply_create", payload.get('d', {}))
+        _forum = OpenThread(self.api, payload.get("d", {}))
+        self._dispatch("open_forum_reply_create", payload.get("d", {}))
 
     def parse_open_forum_reply_delete(self, payload):
-        _forum = OpenThread(self.api, payload.get('d', {}))
-        self._dispatch("open_forum_reply_delete", payload.get('d', {}))
+        _forum = OpenThread(self.api, payload.get("d", {}))
+        self._dispatch("open_forum_reply_delete", payload.get("d", {}))

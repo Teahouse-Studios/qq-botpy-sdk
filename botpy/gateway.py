@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import inspect
 import json
-from typing import Optional
+from typing import Any, Optional
 
-from aiohttp import WSMessage, ClientWebSocketResponse, TCPConnector, ClientSession, WSMsgType
+import httpx
+from httpx_ws import WebSocketDisconnect, aconnect_ws
 
 from . import logging
 from .connection import ConnectionSession
@@ -43,7 +45,10 @@ class BotWebSocket:
     DEFAULT_HEARTBEAT_INTERVAL = 45.0
 
     def __init__(self, session: Session, _connection: ConnectionSession):
-        self._conn: Optional[ClientWebSocketResponse] = None
+        # ``httpx-ws`` deliberately keeps its WebSocket object independent of
+        # httpx's HTTP response types.  Keep the connection typed as ``Any``
+        # here so callers can inject lightweight test doubles as before.
+        self._conn: Optional[Any] = None
         self._session = session
         self._connection = _connection
         self._parser = _connection.parser
@@ -56,6 +61,10 @@ class BotWebSocket:
         self._closing = False
         self._sleep = asyncio.sleep
         self._reconnect_wait_task: Optional[asyncio.Task] = None
+        self._gateway_access_token: Optional[str] = None
+        claim_gateway = getattr(self._connection, "claim_gateway", None)
+        if claim_gateway is not None:
+            claim_gateway(self._session, self)
         reconnect_policy = self._session.get("reconnect_policy")
         if not isinstance(reconnect_policy, ReconnectPolicy):
             reconnect_policy = ReconnectPolicy()
@@ -67,15 +76,23 @@ class BotWebSocket:
             return
         _log.error("[botpy] websocket连接: %s, 异常信息 : %s" % (self._conn, exception))
         self._stop_heartbeat()
-        if self._conn is None or self._conn.closed:
-            await self._queue_reconnect()
+        if self._conn is None or self._ws_is_closed(self._conn):
+            if self._mark_disconnected():
+                await self._queue_reconnect()
 
     async def on_closed(self, close_status_code, close_msg):
+        if not self._mark_disconnected():
+            self._stop_heartbeat()
+            _log.debug("[botpy] 忽略已被替换的 Gateway 连接关闭回调")
+            return
         _log.info("[botpy] 关闭, 返回码: %s" % close_status_code + ", 返回信息: %s" % close_msg)
+        # The task which detected a missed heartbeat may already own the
+        # delayed reconnect.  A duplicate CLOSED frame must not cancel that
+        # task before it can put the session back into the connection queue.
+        if self._reconnect_queued:
+            return
         self._stop_heartbeat()
         if self._closing:
-            return
-        if self._reconnect_queued:
             return
 
         action = self._reconnect_policy.handle_close(close_status_code)
@@ -83,13 +100,12 @@ class BotWebSocket:
             action = CloseAction(
                 should_reconnect=True,
                 clear_session=True,
-                refresh_token=True,
                 reason="resume is not allowed",
             )
 
         if action.refresh_token:
             _log.info("[botpy] Gateway 要求刷新 token: %s", action.reason)
-            self._session["token"].access_token = None
+            self._clear_rejected_access_token()
         if action.clear_session:
             _log.info("[botpy] Gateway Session 已清理: %s", action.reason)
             self._session["session_id"] = ""
@@ -131,8 +147,9 @@ class BotWebSocket:
     async def _close_for_reconnect(self, reason: str, can_resume: bool):
         """主动关闭连接，并根据服务端指令决定 Resume 或重新 Identify。"""
         self._can_reconnect = can_resume
-        if self._conn is not None and not self._conn.closed:
-            await self._conn.close(code=4000, message=reason.encode("utf-8")[:123])
+        self._mark_disconnected()
+        if self._conn is not None and not self._ws_is_closed(self._conn):
+            await self._close_ws(self._conn, 4000, reason)
         await self.on_closed(4000, reason)
 
     async def start(self, handler: EventHandler) -> None:
@@ -145,18 +162,22 @@ class BotWebSocket:
         """停止当前传输且不进入重连队列。"""
         self._closing = True
         self._can_reconnect = False
+        self._mark_disconnected()
         self._stop_heartbeat()
         reconnect_wait_task = self._reconnect_wait_task
         if reconnect_wait_task and reconnect_wait_task is not asyncio.current_task():
             reconnect_wait_task.cancel()
-        if self._conn is not None and not self._conn.closed:
-            await self._conn.close(code=1000, message=b"client closing")
+        if self._conn is not None and not self._ws_is_closed(self._conn):
+            await self._close_ws(self._conn, 1000, "client closing")
 
     async def on_message(self, ws, message):
         _log.debug("[botpy] 接收消息: %s" % message)
         msg = json.loads(message)
         if not isinstance(msg, dict):
             raise ValueError("gateway payload must be an object")
+        if not self._is_current_gateway():
+            _log.debug("[botpy] 忽略已被替换的 Gateway 连接的迟到消息")
+            return
 
         if await self._is_system_event(msg, ws):
             return
@@ -167,10 +188,18 @@ class BotWebSocket:
 
         if event == "READY":
             ready = await self._ready_handler(msg)
+            if not self._mark_ready():
+                _log.debug("[botpy] 忽略已被替换的 Gateway READY 事件")
+                return
+            self._reconnect_policy.on_connected()
             self._start_heartbeat()
             _log.info(f"[botpy] 机器人「{ready['user']['username']}」启动成功！")
 
         if event == "RESUMED":
+            if not self._mark_ready():
+                _log.debug("[botpy] 忽略已被替换的 Gateway RESUMED 事件")
+                return
+            self._reconnect_policy.on_connected()
             self._start_heartbeat()
             _log.info("[botpy] 机器人重连成功! ")
 
@@ -194,18 +223,71 @@ class BotWebSocket:
 
         # 在网关事件完成解析和分发后再记录序列号，避免 Resume 跳过处理失败的事件。
         if isinstance(event_seq, int) and not isinstance(event_seq, bool) and event_seq >= 0:
+            # Event handlers are awaitable.  A replacement connection may
+            # have claimed the shard while one was running, in which case the
+            # old event must not overwrite the replacement's resume cursor.
+            if not self._is_current_gateway():
+                _log.debug("[botpy] 忽略已被替换的 Gateway 连接的迟到序列号")
+                return
             self._session["last_seq"] = event_seq
             await self._persist_session()
 
-    async def on_connected(self, ws: ClientWebSocketResponse):
+    async def on_connected(self, ws: Any):
         self._conn = ws
         if self._conn is None:
             raise Exception("[botpy] websocket连接失败")
-        self._reconnect_policy.on_connected()
+        if not self._is_current_gateway():
+            _log.debug("[botpy] 忽略已被替换的 Gateway 连接鉴权")
+            return
         if self._session["session_id"]:
             await self.ws_resume()
         else:
             await self.ws_identify()
+
+    def _mark_ready(self) -> bool:
+        marker = getattr(self._connection, "mark_ready", None)
+        if marker is not None:
+            return marker(self._session, owner=self) is not False
+        return True
+
+    def _is_current_gateway(self) -> bool:
+        checker = getattr(self._connection, "is_gateway_owner", None)
+        if checker is not None:
+            return checker(self._session, self) is not False
+        return True
+
+    def _mark_disconnected(self) -> bool:
+        marker = getattr(self._connection, "mark_disconnected", None)
+        if marker is not None:
+            return marker(self._session, owner=self) is not False
+        return True
+
+    def _clear_rejected_access_token(self) -> None:
+        token = self._session["token"]
+        rejected_token = self._gateway_access_token
+        compare_and_clear = getattr(token, "clear_access_token", None)
+        if rejected_token is not None and callable(compare_and_clear):
+            if not compare_and_clear(rejected_token):
+                _log.info("[botpy] Gateway 拒绝的是旧 token，保留当前 access token")
+            return
+        token.access_token = None
+
+    async def _get_gateway_token(self) -> str:
+        token = self._session["token"]
+        get_access_token = getattr(token, "get_access_token", None)
+        if callable(get_access_token):
+            token_value = await get_access_token()
+        else:
+            await token.check_token()
+            token_value = token.access_token
+        self._gateway_access_token = token_value
+
+        get_string = token.get_string
+        try:
+            inspect.signature(get_string).bind(token_value)
+        except (TypeError, ValueError):
+            return get_string()
+        return get_string(token_value)
 
     async def ws_connect(self):
         """
@@ -217,21 +299,81 @@ class BotWebSocket:
         if not ws_url:
             raise Exception("[botpy] 会话url为空")
 
-        async with ClientSession(connector=TCPConnector(limit=10)) as session:
-            async with session.ws_connect(self._session["url"]) as ws_conn:
+        # httpx does not provide a WebSocket client itself; httpx-ws bridges
+        # an ``httpx.AsyncClient`` to a standards-compliant WebSocket stream.
+        # Keep a short-lived HTTP client per Gateway connection and bound
+        # concurrent connection attempts.
+        async with httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=10),
+            timeout=None,
+            verify=self._session.get("ssl") if self._session.get("ssl") is not None else True,
+        ) as session:
+            async with aconnect_ws(self._session["url"], session) as ws_conn:
+                self._conn = ws_conn
+                if self._closing:
+                    await self._close_ws(ws_conn, 1000, "client closing")
+                    return
                 while True:
-                    msg: WSMessage
-                    msg = await ws_conn.receive()
-                    if msg.type == WSMsgType.TEXT:
-                        await self.on_message(ws_conn, msg.data)
-                    elif msg.type == WSMsgType.ERROR:
-                        exception = ws_conn.exception() or RuntimeError("websocket transport error")
+                    try:
+                        msg = await ws_conn.receive()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exception:
+                        # A network failure can surface as an exception rather
+                        # than a close frame with httpx-ws.  Route it through
+                        # the existing reconnect policy used for receive failures.
+                        if isinstance(exception, WebSocketDisconnect):
+                            await self.on_closed(
+                                getattr(exception, "code", None),
+                                getattr(exception, "reason", None),
+                            )
+                            break
                         await self.on_error(exception)
-                        await ws_conn.close()
-                        await self.on_closed(ws_conn.close_code, str(exception))
-                    elif msg.type == WSMsgType.CLOSED or msg.type == WSMsgType.CLOSE:
-                        await self.on_closed(ws_conn.close_code, msg.extra)
-                    if ws_conn.closed:
+                        if not self._ws_is_closed(ws_conn):
+                            # 1006 is a receive-only synthetic status and
+                            # must not be sent in a close frame.
+                            await self._close_ws(ws_conn, 1011, str(exception))
+                        await self.on_closed(
+                            getattr(ws_conn, "close_code", None) or getattr(exception, "code", None),
+                            getattr(exception, "reason", None) or str(exception),
+                        )
+                        break
+
+                    if isinstance(msg, str):
+                        await self.on_message(ws_conn, msg)
+                    elif isinstance(msg, (bytes, bytearray, memoryview)):
+                        # Gateway payloads are JSON text.  Decode binary frames
+                        # defensively to preserve the old behaviour for servers
+                        # that mark a text payload as binary.
+                        await self.on_message(ws_conn, bytes(msg).decode("utf-8"))
+                    else:
+                        msg_type = getattr(msg, "type", None)
+                        type_name = getattr(msg_type, "name", msg_type)
+                        # httpx-ws 0.9 yields wsproto event objects whose
+                        # ``type`` attribute is absent; use the class name as
+                        # the stable discriminator for those events.
+                        type_name = str(type_name or msg.__class__.__name__).casefold()
+                        data = getattr(msg, "data", None)
+                        if "text" in type_name and isinstance(data, str):
+                            await self.on_message(ws_conn, data)
+                        elif ("bytes" in type_name or "binary" in type_name) and data is not None:
+                            await self.on_message(ws_conn, bytes(data).decode("utf-8"))
+                        elif "error" in type_name:
+                            exception = getattr(ws_conn, "exception", None)
+                            if callable(exception):
+                                exception = exception() or RuntimeError("websocket transport error")
+                            exception = exception or RuntimeError("websocket transport error")
+                            await self.on_error(exception)
+                            await self.on_closed(
+                                getattr(ws_conn, "close_code", None),
+                                str(exception),
+                            )
+                        elif "close" in type_name:
+                            await self.on_closed(
+                                getattr(ws_conn, "close_code", None) or getattr(msg, "code", None),
+                                getattr(msg, "reason", None) or getattr(msg, "extra", None),
+                            )
+                    if self._ws_is_closed(ws_conn):
                         _log.info("[botpy] ws关闭, 停止接收消息!")
                         break
 
@@ -241,7 +383,10 @@ class BotWebSocket:
             self._session["intent"] = 1
 
         _log.info("[botpy] 鉴权中...")
-        await self._session["token"].check_token()
+        gateway_token = await self._get_gateway_token()
+        if not self._is_current_gateway():
+            _log.debug("[botpy] 忽略已被替换的 Gateway Identify")
+            return
         payload = {
             "op": self.WS_IDENTITY,
             "d": {
@@ -249,7 +394,7 @@ class BotWebSocket:
                     self._session["shards"]["shard_id"],
                     self._session["shards"]["shard_count"],
                 ],
-                "token": self._session["token"].get_string(),
+                "token": gateway_token,
                 "intents": self._session["intent"],
             },
         }
@@ -263,22 +408,57 @@ class BotWebSocket:
         """
         send_msg = event_json
         _log.debug("[botpy] 发送消息: %s" % send_msg)
-        if isinstance(self._conn, ClientWebSocketResponse):
-            if self._conn.closed:
-                _log.debug("[botpy] ws连接已关闭! ws对象: %s" % self._conn)
-            else:
-                await self._conn.send_str(data=send_msg)
+        if self._conn is None:
+            return
+        if self._ws_is_closed(self._conn):
+            _log.debug("[botpy] ws连接已关闭! ws对象: %s" % self._conn)
+            return
+        send_text = getattr(self._conn, "send_text", None)
+        if callable(send_text):
+            await send_text(send_msg)
+            return
+        # Keep compatibility with legacy test doubles and custom
+        # transports that expose ``send_str``.
+        send_str = getattr(self._conn, "send_str", None)
+        if callable(send_str):
+            await send_str(data=send_msg)
+
+    @staticmethod
+    async def _close_ws(ws: Any, code: int, reason: str = "") -> None:
+        """Close an httpx-ws socket or a legacy test double."""
+
+        close = getattr(ws, "close", None)
+        if not callable(close):
+            return
+        try:
+            await close(code=code, reason=reason[:123])
+        except TypeError:
+            # Some legacy doubles use ``message`` bytes instead of ``reason``.
+            await close(code=code, message=reason.encode("utf-8")[:123])
+
+    @staticmethod
+    def _ws_is_closed(ws: Any) -> bool:
+        """Return a closed state for httpx-ws and legacy socket doubles."""
+
+        if bool(getattr(ws, "closed", False)):
+            return True
+        state = getattr(getattr(ws, "connection", None), "state", None)
+        state_name = str(state).casefold() if state is not None else ""
+        return "closed" in state_name or "closing" in state_name
 
     async def ws_resume(self):
         """
         websocket重连
         """
         _log.info("[botpy] 重连启动...")
-        await self._session["token"].check_token()
+        gateway_token = await self._get_gateway_token()
+        if not self._is_current_gateway():
+            _log.debug("[botpy] 忽略已被替换的 Gateway Resume")
+            return
         payload = {
             "op": self.WS_RESUME,
             "d": {
-                "token": self._session["token"].get_string(),
+                "token": gateway_token,
                 "session_id": self._session["session_id"],
                 "seq": self._session["last_seq"],
             },
@@ -375,9 +555,7 @@ class BotWebSocket:
         if self._heartbeat_task and not self._heartbeat_task.done():
             return
         self._heartbeat_acknowledged = True
-        self._heartbeat_task = self._connection.loop.create_task(
-            self._send_heart(self._heartbeat_interval)
-        )
+        self._heartbeat_task = self._connection.loop.create_task(self._send_heart(self._heartbeat_interval))
 
     async def _send_heartbeat(self, track_ack: bool = True):
         payload = {
@@ -399,7 +577,7 @@ class BotWebSocket:
                 if self._conn is None:
                     _log.debug("[botpy] 连接已关闭!")
                     return
-                if self._conn.closed:
+                if self._ws_is_closed(self._conn):
                     _log.debug("[botpy] ws连接已关闭, 心跳检测停止，ws对象: %s" % self._conn)
                     return
 
@@ -414,5 +592,5 @@ class BotWebSocket:
             return
         except Exception as exception:
             await self.on_error(exception)
-            if self._conn is not None and not self._conn.closed:
-                await self._conn.close(code=4000, message=b"heartbeat failure")
+            if self._conn is not None and not self._ws_is_closed(self._conn):
+                await self._close_ws(self._conn, 4000, "heartbeat failure")

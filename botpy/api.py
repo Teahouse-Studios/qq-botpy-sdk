@@ -4,7 +4,7 @@
 
 from io import BufferedReader
 from collections.abc import Sequence
-from typing import Any, List, Union, BinaryIO, Dict, Mapping, Optional
+from typing import Any, Awaitable, Callable, List, Union, BinaryIO, Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
 from .flags import Permission
@@ -134,8 +134,7 @@ def _validate_menu(value: Mapping[str, Any]) -> Dict[str, Any]:
         else:
             sub_items = _bounded_list(item.get("sub_menu_items"), f"{name}.sub_menu_items", 5)
             item["sub_menu_items"] = [
-                _validate_sub_menu_item(sub_item, sub_index)
-                for sub_index, sub_item in enumerate(sub_items)
+                _validate_sub_menu_item(sub_item, sub_index) for sub_index, sub_item in enumerate(sub_items)
             ]
         normalized.append(item)
     result["items"] = normalized
@@ -259,12 +258,29 @@ class BotAPI:
         - API当前返回的所有自定义类型数据为字典数据，通过TypedDict进行类型提示
     """
 
-    def __init__(self, http: BotHttp):
+    def __init__(
+        self,
+        http: BotHttp,
+        message_guard: Optional[Callable[[], Awaitable[None]]] = None,
+    ):
         """
         Args:
           http (BotHttp): 用于发送请求的 http 客户端。
         """
         self._http = http
+        self._message_guard = message_guard
+
+    async def _wait_until_message_send_ready(self) -> None:
+        if self._message_guard is not None:
+            await self._message_guard()
+
+    async def _request_message(self, route: Route, **kwargs: Any) -> Any:
+        """Run the Gateway guard before the first request and every HTTP retry."""
+
+        await self._wait_until_message_send_ready()
+        if self._message_guard is not None:
+            kwargs["before_attempt"] = self._message_guard
+        return await self._http.request(route, **kwargs)
 
     async def request(
         self,
@@ -824,7 +840,7 @@ class BotAPI:
         payload.update(extra)
         payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/channels/{channel_id}/messages", channel_id=channel_id)
-        return await self._http.request(route, json=payload)
+        return await self._request_message(route, json=payload)
 
     async def recall_message(self, channel_id: str, message_id: str, hidetip: bool = False) -> str:
         """
@@ -904,7 +920,7 @@ class BotAPI:
             "/channels/{channel_id}/messages",
             channel_id=channel_id,
         )
-        return await self._http.request(route, json=payload)
+        return await self._request_message(route, json=payload)
 
     async def on_interaction_result(
         self,
@@ -1044,7 +1060,7 @@ class BotAPI:
         payload.update(extra)
         payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/dms/{guild_id}/messages", guild_id=guild_id)
-        return await self._http.request(route, json=payload)
+        return await self._request_message(route, json=payload)
 
     # 音频接口
     async def update_audio(self, channel_id: str, audio_control: audio.AudioControl) -> str:
@@ -2151,7 +2167,12 @@ class BotAPI:
         payload.update(extra)
         payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/groups/{group_openid}/messages", group_openid=group_openid)
-        return await self._http.request(route, json=payload)
+        return await self._request_message(
+            route,
+            retry_time=1,
+            json=payload,
+            retry_ambiguous=bool(msg_id),
+        )
 
     async def post_c2c_message(
         self,
@@ -2211,7 +2232,12 @@ class BotAPI:
         payload.update(extra)
         payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
-        return await self._http.request(route, json=payload)
+        return await self._request_message(
+            route,
+            retry_time=1,
+            json=payload,
+            retry_ambiguous=bool(msg_id),
+        )
 
     async def post_c2c_typing(
         self,
@@ -2230,7 +2256,12 @@ class BotAPI:
         if msg_id:
             payload["msg_id"] = msg_id
         route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
-        return await self._http.request(route, json=payload)
+        return await self._request_message(
+            route,
+            retry_time=1,
+            json=payload,
+            retry_ambiguous=bool(msg_id),
+        )
 
     async def post_c2c_stream_message(
         self,
@@ -2261,7 +2292,7 @@ class BotAPI:
         }
         payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/users/{openid}/stream_messages", openid=openid)
-        return await self._http.request(route, json=payload)
+        return await self._request_message(route, json=payload)
 
     async def post_upload_prepare(
         self,
@@ -2377,6 +2408,8 @@ class BotAPI:
         }
         payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/groups/{group_openid}/files", group_openid=group_openid)
+        if srv_send_msg:
+            return await self._request_message(route, json=payload, timeout=120)
         return await self._http.request(route, json=payload, timeout=120)
 
     async def post_c2c_file(
@@ -2408,4 +2441,6 @@ class BotAPI:
         }
         payload = {key: value for key, value in payload.items() if value is not None}
         route = Route("POST", "/v2/users/{openid}/files", openid=openid)
+        if srv_send_msg:
+            return await self._request_message(route, json=payload, timeout=120)
         return await self._http.request(route, json=payload, timeout=120)

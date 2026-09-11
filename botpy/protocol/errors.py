@@ -97,11 +97,23 @@ class TransportError(BotPyError):
         method: Optional[str] = None,
         url: Optional[str] = None,
         cause: Optional[BaseException] = None,
+        attempts: Optional[int] = None,
     ) -> None:
         super().__init__(message)
+        self.message = message
         self.method = method
         self.url = url
         self.cause = cause
+        self.attempts = attempts
+
+    def __str__(self) -> str:
+        context = []
+        if self.cause is not None:
+            context.append(f"cause={type(self.cause).__name__}")
+        if self.attempts is not None:
+            context.append(f"attempts={self.attempts}")
+        suffix = f" ({', '.join(context)})" if context else ""
+        return f"{self.message}{suffix}"
 
 
 class UploadDailyLimitExceededError(BotPyError):

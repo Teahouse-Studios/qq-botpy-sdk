@@ -63,8 +63,7 @@ client_a = botpy.Client(intents_a, ext_handlers=False)
 client_b = botpy.Client(intents_b, ext_handlers=False)
 ```
 
-`configure_loguru()` 默认只接管 `botpy` logger，并设置 `propagate=False`，不会拦截 aiohttp、应用代码或
-其他第三方库。
+`configure_loguru()` 默认只接管 `botpy` logger，并设置 `propagate=False`，不会拦截应用代码或其他第三方库。
 
 ## 接管所有标准库日志
 
@@ -75,7 +74,7 @@ botpy.configure_loguru(logger, logger_name=None)
 client = botpy.Client(intents, ext_handlers=False)
 ```
 
-这种模式会接管根 logger。建议同时检查 uvicorn、gunicorn、aiohttp 等框架是否安装了自己的 handler，
+这种模式会接管根 logger。建议同时检查 uvicorn、gunicorn 等框架是否安装了自己的 handler，
 避免框架重复输出。
 
 ## 结构化上下文

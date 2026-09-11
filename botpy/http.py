@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
-from json.decoder import JSONDecodeError
-from typing import Any, Optional, ClassVar, Union, Dict
-
-import aiohttp
-from aiohttp import ClientResponse, FormData, multipart, hdrs, payload
+from typing import Any, Awaitable, Callable, Optional, ClassVar, Dict
 
 from . import logging
 from .errors import HttpErrorDict, ServerError
@@ -13,78 +9,7 @@ from .protocol.http import ApiClient
 from .robot import Token
 from .types import robot
 
-X_TPS_TRACE_ID = "X-Tps-trace-Id"
-
 _log = logging.get_logger()
-
-# 请求成功的返回码
-HTTP_OK_STATUS = [200, 202, 204]
-
-
-class _FormData(FormData):
-    def _gen_form_data(self) -> multipart.MultipartWriter:
-        """Encode a list of fields using the multipart/form-data MIME format"""
-        if getattr(self, "_is_processed", False):
-            return self._writer  # rewrite this part of FormData object to enable retry of request
-        for dispparams, headers, value in self._fields:
-            try:
-                if hdrs.CONTENT_TYPE in headers:
-                    part = payload.get_payload(
-                        value,
-                        content_type=headers[hdrs.CONTENT_TYPE],
-                        headers=headers,
-                        encoding=self._charset,
-                    )
-                else:
-                    part = payload.get_payload(
-                        value,
-                        headers=headers,
-                        encoding=self._charset,
-                    )
-            except Exception as exc:
-                print(value)
-                raise TypeError(
-                    "Can not serialize value type: %r\n " "headers: %r\n value: %r" % (type(value), headers, value)
-                ) from exc
-
-            if dispparams:
-                part.set_content_disposition(
-                    "form-data",
-                    quote_fields=self._quote_fields,
-                    **dispparams,
-                )
-                assert part.headers is not None
-                part.headers.popall(hdrs.CONTENT_LENGTH, None)
-
-            self._writer.append_payload(part)
-
-        self._is_processed = True
-        return self._writer
-
-
-async def _handle_response(response: ClientResponse) -> Union[Dict[str, Any], str]:
-    url = response.request_info.url
-    try:
-        condition = response.headers["content-type"] == "application/json"
-        # note that when content-type is application/json, aiohttp will directly auto-sub encoding to be utf-8
-        data = await response.json() if condition else await response.text()
-    except (KeyError, JSONDecodeError):
-        data = None
-    if response.status in HTTP_OK_STATUS:
-        _log.debug(f"[botpy] 请求成功, 请求连接: {url}, 返回内容: {data}, trace_id:{response.headers.get(X_TPS_TRACE_ID)}")
-        return data
-    else:
-        _log.error(
-            f"[botpy] 接口请求异常，请求连接: {url}, "
-            f"错误代码: {response.status}, 返回内容: {data}, trace_id:{response.headers.get(X_TPS_TRACE_ID)}"
-            # trace_id 用于定位接口问题
-        )
-        error_dict_get = HttpErrorDict.get(response.status)
-        # type of data should be dict or str or None, so there should be a condition to check and prevent bug
-        message = data["message"] if isinstance(data, dict) else str(data)
-        if not error_dict_get:
-            raise ServerError(message) from None  # adding from None to prevent chain exception being raised
-        raise error_dict_get(msg=message) from None
 
 
 class Route:
@@ -148,12 +73,16 @@ class BotHttp:
                 ssl=self.ssl,
             )
         )
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session = None
         self._client: Optional[ApiClient] = None
         self._global_over: Optional[asyncio.Event] = None
         self._headers: Optional[dict] = None
+        self._closed = False
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if self._client:
             await self._client.close()
         if self._token:
@@ -162,6 +91,8 @@ class BotHttp:
         self._client = None
 
     async def check_session(self):
+        if self._closed:
+            raise RuntimeError("[botpy] HTTP 客户端已关闭")
         if self._token is None:
             raise RuntimeError("[botpy] token 尚未初始化")
         await self._token.check_token()
@@ -189,18 +120,25 @@ class BotHttp:
             json_ = kwargs["json"]
             json__get = json_.get("file_image")
             if json__get and isinstance(json__get, bytes):
-                kwargs["data"] = _FormData()
-                for k, v in kwargs.pop("json").items():
-                    if v:
-                        if isinstance(v, dict):
-                            if k == "message_reference":
-                                _log.error(
-                                    f"[botpy] 接口参数传入异常, 请求连接: {route.url}, "
-                                    f"错误原因: file_image与message_reference不能同时传入，"
-                                    f"备注: sdk已按照优先级，去除message_reference参数"
-                                )
-                        else:
-                            kwargs["data"].add_field(k, v)
+                form_fields = {}
+                for key, value in kwargs.pop("json").items():
+                    if not value:
+                        continue
+                    if isinstance(value, dict):
+                        if key == "message_reference":
+                            _log.error(
+                                f"[botpy] 接口参数传入异常, 请求连接: {route.url}, "
+                                f"错误原因: file_image与message_reference不能同时传入，"
+                                f"备注: sdk已按照优先级，去除message_reference参数"
+                            )
+                        continue
+                    # httpx's multipart encoder accepts text/bytes payloads;
+                    # stringify scalar fields so numeric flags retain the
+                    # previous form-data behaviour instead of raising a
+                    # serialization error.
+                    form_fields[key] = (None, value if isinstance(value, (str, bytes, bytearray)) else str(value))
+                form_fields["file_image"] = (None, json__get)
+                kwargs["files"] = form_fields
 
         await self.check_session()
         route.is_sandbox = self.is_sandbox
@@ -208,9 +146,12 @@ class BotHttp:
 
         json_body = kwargs.pop("json", None)
         data = kwargs.pop("data", None)
+        files = kwargs.pop("files", None)
         params = kwargs.pop("params", None)
         timeout = kwargs.pop("timeout", None)
         retry_unsafe = kwargs.pop("retry_unsafe", False)
+        retry_ambiguous = kwargs.pop("retry_ambiguous", False)
+        before_attempt: Optional[Callable[[], Awaitable[None]]] = kwargs.pop("before_attempt", None)
         if kwargs:
             raise TypeError("不支持的 HTTP 请求参数: %s" % ", ".join(sorted(kwargs)))
 
@@ -221,9 +162,12 @@ class BotHttp:
                 params=params,
                 json_body=json_body,
                 data=data,
+                files=files,
                 retries=2 - retry_time,
                 retry_unsafe=retry_unsafe,
+                retry_ambiguous=retry_ambiguous,
                 timeout=timeout,
+                before_attempt=before_attempt,
             )
         except ApiError as error:
             exception_type = HttpErrorDict.get(error.status, ServerError)
@@ -277,12 +221,17 @@ class BotHttp:
             ) from error
 
     async def get_access_token(self, force_refresh: bool = False) -> str:
+        if self._closed:
+            raise RuntimeError("[botpy] HTTP 客户端已关闭")
         if self._token is None:
             raise RuntimeError("[botpy] token 尚未初始化")
         return await self._token.get_access_token(force_refresh=force_refresh)
 
     async def login(self, token: Token) -> robot.Robot:
         """login后保存token和session"""
+
+        if self._closed:
+            raise RuntimeError("[botpy] HTTP 客户端已关闭")
 
         previous_token = self._token
         if self._client and self._client.token_provider is not token:

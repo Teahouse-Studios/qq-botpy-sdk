@@ -17,11 +17,12 @@ client = botpy.Client(
     reply_limiter=ReplyLimiter(limit=4, ttl_seconds=3600),
     on_message_sent=lambda ref_idx, meta: save_ref(ref_idx, meta),
     loguru_logger=logger,
+    gateway_send_timeout=30.0,
 )
 ```
 
-`ssl` 会原样传给 aiohttp，可使用 `ssl.SSLContext`、aiohttp Fingerprint 或布尔值。生产环境不要使用
-`False`；自定义 CA 应使用 `ssl.create_default_context(cafile=...)`。
+`ssl` 会传给 httpx，可使用 `ssl.SSLContext` 或布尔值。生产环境不要使用 `False`；自定义 CA 应使用
+`ssl.create_default_context(cafile=...)`。httpx 不支持旧版客户端特有的 Fingerprint 对象。
 
 首次登录会同步获取 token，随后启动后台提前刷新循环；`Client.close()` 会停止该任务。
 
@@ -30,6 +31,10 @@ client = botpy.Client(
 `menu` 和 `panels` 用于声明机器人启动时要同步的全局菜单与指令面板。`config_sync_strict=False` 时同步失败会
 记录错误并继续启动；设为 `True` 时同步失败将中止启动。构造方法、同步边界与多副本部署注意事项见
 [自定义菜单与指令面板](./MENU_PANEL.md)。
+
+WebSocket 模式下，消息发送会在 Gateway 连接或重连时等待所有分片 READY/RESUMED。
+`gateway_send_timeout` 默认为 30 秒；`None` 表示一直等待，`0` 表示不等待。首次请求前等待超时会在
+HTTP 请求发出前抛出 `TransportError`；重试等待超时则保留此前的请求次数。
 
 ## 统一消息发送
 
@@ -41,7 +46,8 @@ client = botpy.Client(
 - `await client.recall_message(target, message_id)`
 
 `send_text()` 自动切分超过 5000 字符的文本。单段返回一个平台响应，多段返回响应列表。C2C 和群聊携带
-`message_id` 时会执行被动回复限制；超限后自动转主动发送。
+`message_id` 时会执行被动回复限制；超限后自动转主动发送。常规消息 POST 中，仅这类带 `msg_id` 的
+被动回复会对不确定的传输失败重试一次；主动消息不自动重试。
 
 ## 媒体
 
@@ -64,6 +70,9 @@ token = await client.api.get_token()
 ```
 
 POST/PATCH 默认不重试。只有确认接口具有幂等语义时，才传 `retry_unsafe=True`。
+
+`TransportError` 提供 `method`、`url`、原始 `cause` 和 `attempts` 便于诊断；`attempts=0` 明确表示
+HTTP 请求尚未发出。
 
 ## 群管理
 

@@ -85,7 +85,6 @@ class ReconnectPolicy:
             return CloseAction(
                 True,
                 clear_session=True,
-                refresh_token=True,
                 reason="invalid or expired session",
             )
 
@@ -93,7 +92,6 @@ class ReconnectPolicy:
             return CloseAction(
                 True,
                 clear_session=True,
-                refresh_token=True,
                 reason="gateway internal error",
             )
 

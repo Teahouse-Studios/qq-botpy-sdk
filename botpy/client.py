@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import inspect
+import math
 import re
 import traceback
 from collections import OrderedDict
@@ -19,6 +20,7 @@ from .gateway import BotWebSocket
 from .http import BotHttp
 from .middleware import Middleware, MiddlewareContext, create_middleware_context, run_middleware_chain
 from .protocol.events import normalize_inbound_message
+from .protocol.errors import TransportError
 from .protocol.media import ChunkedMediaUploader, ProgressCallback
 from .protocol.message import (
     LARGE_MEDIA_THRESHOLD,
@@ -87,6 +89,7 @@ class Client:
         menu: Optional[Menu] = None,
         panels: Optional[Iterable[Panel]] = None,
         config_sync_strict: bool = False,
+        gateway_send_timeout: Optional[float] = 30.0,
     ):
         """
         Args:
@@ -106,7 +109,7 @@ class Client:
           base_url: 自定义开放平台 REST API 根地址，主要用于测试或代理。
           token_base_url: 自定义 access token 服务根地址。
           user_agent: HTTP 请求使用的 User-Agent。
-          ssl: 传给 aiohttp 的 SSLContext、Fingerprint 或布尔值。
+          ssl: 传给 httpx/httpx-ws 的 SSLContext 或布尔值。
           upload_cache: 自定义媒体上传缓存；默认每个 Client 独享一份内存缓存。
           reply_limiter: 自定义被动回复限制器；默认每条消息每小时最多 4 次。
           on_message_sent: 平台响应包含 ``ext_info.ref_idx`` 时调用的出站消息钩子。
@@ -114,6 +117,7 @@ class Client:
           menu: 可选的声明式 C2C 全局菜单；配置后在登录成功时按差异同步。
           panels: 可选的声明式指令面板集合；使用稳定 key 非破坏性同步。
           config_sync_strict: 配置同步失败时是否中止客户端启动。
+          gateway_send_timeout: Gateway 重连期间等待消息发送恢复的秒数；``None`` 表示一直等待。
         """
         self.intents: int = intents.value
         self.ret_coro: bool = False
@@ -129,7 +133,22 @@ class Client:
             raise TypeError("markdown_support must be a bool")
         if not isinstance(config_sync_strict, bool):
             raise TypeError("config_sync_strict must be a bool")
+        gateway_timeout_value = None
+        if gateway_send_timeout is not None:
+            if (
+                isinstance(gateway_send_timeout, bool)
+                or not isinstance(gateway_send_timeout, (int, float))
+                or gateway_send_timeout < 0
+            ):
+                raise ValueError("gateway_send_timeout must be a non-negative finite number or None")
+            try:
+                gateway_timeout_value = float(gateway_send_timeout)
+            except OverflowError as exc:
+                raise ValueError("gateway_send_timeout must be a non-negative finite number or None") from exc
+            if not math.isfinite(gateway_timeout_value):
+                raise ValueError("gateway_send_timeout must be a non-negative finite number or None")
         self._markdown_support = markdown_support
+        self._gateway_send_timeout = gateway_timeout_value
         self._token_base_url = token_base_url
         self._user_agent = user_agent
         self._ssl = ssl
@@ -141,7 +160,7 @@ class Client:
             user_agent=user_agent,
             ssl=ssl,
         )
-        self.api: BotAPI = BotAPI(http=self.http)
+        self.api: BotAPI = BotAPI(http=self.http, message_guard=self._wait_for_gateway_ready)
         self.configuration = ConfigurationManager(
             self.api,
             menu=menu,
@@ -150,6 +169,8 @@ class Client:
         self._config_sync_strict = config_sync_strict
 
         self._connection: Optional[ConnectionSession] = None
+        self._gateway_starting = False
+        self._gateway_connection_created = asyncio.Event()
         self._closed: bool = False
         self._listeners: Dict[str, List[Tuple[asyncio.Future, Callable[..., bool]]]] = {}
         self._ws_ap: Dict = {}
@@ -212,6 +233,58 @@ class Client:
         if self._robot is None:
             raise RuntimeError("机器人尚未登录")
         return self._robot
+
+    async def _wait_for_gateway_ready(self) -> None:
+        """Delay message POSTs until every Gateway shard is ready again."""
+
+        if self._closed:
+            raise RuntimeError("无法通过已关闭的 Client 发送消息")
+        if getattr(self, "_transport_mode", None) != "websocket":
+            return
+        connection = getattr(self, "_connection", None)
+        if connection is None and not self._gateway_starting:
+            return
+        if connection is not None and connection.is_ready:
+            return
+
+        timeout = self._gateway_send_timeout
+        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+        _log.info("[botpy] Gateway 正在连接或重连，消息发送等待恢复，timeout=%s", timeout)
+        try:
+            if connection is None:
+                if deadline is None:
+                    await self._gateway_connection_created.wait()
+                else:
+                    await asyncio.wait_for(
+                        self._gateway_connection_created.wait(),
+                        timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+                    )
+                if self._closed:
+                    raise RuntimeError("无法通过已关闭的 Client 发送消息")
+                connection = self._connection
+                if connection is None:
+                    raise TransportError("Gateway 启动未完成，消息尚未发送", method="POST", attempts=0)
+            if connection.is_ready:
+                return
+            remaining = (
+                None
+                if deadline is None
+                else max(
+                    0.0,
+                    deadline - asyncio.get_running_loop().time(),
+                )
+            )
+            await connection.wait_until_ready(timeout=remaining)
+        except asyncio.TimeoutError as exc:
+            timeout_text = "无限" if timeout is None else f"{timeout:g} 秒"
+            raise TransportError(
+                f"Gateway 在{timeout_text}内未恢复，消息尚未发送",
+                method="POST",
+                cause=exc,
+                attempts=0,
+            ) from exc
+        if self._closed:
+            raise RuntimeError("无法通过已关闭的 Client 发送消息")
 
     def use(self, *middlewares: Middleware) -> "Client":
         """追加统一消息中间件，并返回当前 Client 以便链式配置。"""
@@ -585,9 +658,7 @@ class Client:
             raise ValueError("media file must not be empty")
         limit = MEDIA_FILE_SIZE_LIMITS[int(file_type)]
         if size > limit:
-            raise ValueError(
-                f"media is too large for {file_type.name.lower()}; limit is {limit // (1024 * 1024)} MiB"
-            )
+            raise ValueError(f"media is too large for {file_type.name.lower()}; limit is {limit // (1024 * 1024)} MiB")
 
     @staticmethod
     def _validate_base64_upload(file_data: str) -> None:
@@ -719,6 +790,13 @@ class Client:
             return
 
         self._closed = True
+        self._gateway_starting = False
+        gateway_connection_created = getattr(self, "_gateway_connection_created", None)
+        if gateway_connection_created is not None:
+            gateway_connection_created.set()
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            connection.mark_closed()
 
         event_transport = getattr(self, "_event_transport", None)
         if event_transport is not None:
@@ -820,6 +898,8 @@ class Client:
         ret_coro: :class:`bool`
             是否需要返回协程对象
         """
+        if getattr(self, "_closed", False):
+            raise RuntimeError("无法启动已关闭的 Client")
         # login后再进行后面的操作
         token = Token(
             appid,
@@ -835,8 +915,19 @@ class Client:
             await self._async_setup_hook()
 
         use_gateway = self._transport_mode == "websocket"
-        await self._bot_login(token, use_gateway=use_gateway)
         if use_gateway:
+            self._gateway_starting = True
+            self._gateway_connection_created.clear()
+        try:
+            await self._bot_login(token, use_gateway=use_gateway)
+        except BaseException:
+            if use_gateway:
+                self._gateway_starting = False
+                self._gateway_connection_created.set()
+            raise
+        if use_gateway:
+            if self._closed:
+                raise RuntimeError("无法启动已关闭的 Client")
             return await self._bot_init(token)
 
         if self._transport_mode == "webhook":
@@ -887,6 +978,8 @@ class Client:
 
         # 通过api获取websocket链接
         self._ws_ap = await self.api.get_ws_url()
+        if getattr(self, "_closed", False):
+            raise RuntimeError("无法启动已关闭的 Client")
 
         # 实例一个session_pool
         self._connection = ConnectionSession(
@@ -896,6 +989,12 @@ class Client:
             loop=self.loop,
             api=self.api,
         )
+        self._gateway_starting = False
+        gateway_connection_created = getattr(self, "_gateway_connection_created", None)
+        if gateway_connection_created is None:
+            gateway_connection_created = asyncio.Event()
+            self._gateway_connection_created = gateway_connection_created
+        gateway_connection_created.set()
 
         self._connection.state.robot = self._robot
 
@@ -952,21 +1051,19 @@ class Client:
         loop = self._connection.loop
         loop.set_exception_handler(_loop_exception_handler)
 
-        while not self._closed:
-            _log.debug("[botpy] 会话循环检查...")
-            try:
-                # 返回协程对象，交由开发者自行调控
-                coroutine = self._connection.multi_run(session_interval)
-                if self.ret_coro:
-                    return coroutine
-                elif coroutine:
-                    await coroutine
-                else:
-                    await self.close()
-                    _log.info("[botpy] 服务意外停止!")
-            except KeyboardInterrupt:
-                _log.info("[botpy] 服务强行停止!")
-                # cancel all tasks lingering
+        # 返回协程对象，交由开发者自行调控
+        coroutine = self._connection.multi_run(session_interval)
+        if self.ret_coro:
+            return coroutine
+        try:
+            await coroutine
+        except KeyboardInterrupt:
+            _log.info("[botpy] 服务强行停止!")
+            return None
+        if not self._closed:
+            await self.close()
+            _log.info("[botpy] 服务意外停止!")
+        return None
 
     async def _create_gateway_session(self, token: Token, shard_id: int, shard_count: int):
         session_id = ""
@@ -993,6 +1090,7 @@ class Client:
             "intent": self.intents,
             "token": token,
             "url": self._ws_ap["url"],
+            "ssl": self._ssl,
             "shards": {"shard_id": shard_id, "shard_count": shard_count},
             "session_store": self._session_store,
         }
@@ -1006,6 +1104,8 @@ class Client:
 
         param session: session对象
         """
+        if self._closed:
+            return
         _log.info("[botpy] 会话启动中...")
 
         client = BotWebSocket(session, self._connection)
@@ -1055,7 +1155,6 @@ class Client:
                 self._schedule_event(coro, legacy_method, *args, **kwargs)
             else:
                 _log.debug("[botpy] 事件: %s 未注册", event)
-
 
     def _schedule_event(
         self,

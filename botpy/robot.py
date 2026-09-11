@@ -76,6 +76,12 @@ class Token:
     async def get_access_token(self, force_refresh: bool = False) -> str:
         return await self._manager.get_access_token(force_refresh=force_refresh)
 
+    async def refresh_access_token(self, stale_token: str) -> str:
+        return await self._manager.refresh_access_token(stale_token)
+
+    def clear_access_token(self, stale_token: str) -> bool:
+        return self._manager.clear_if_current(stale_token)
+
     async def close(self):
         await self._manager.close()
 
@@ -90,10 +96,11 @@ class Token:
         return self
 
     # GetString 获取授权头字符串
-    def get_string(self):
+    def get_string(self, access_token=None):
+        token = self.access_token if access_token is None else access_token
         if self.Type == self.TYPE_NORMAL:
-            return self.access_token
-        return "{} {}".format(self.Type, self.access_token)
+            return token
+        return "{} {}".format(self.Type, token)
 
     def get_type(self):
         return self.Type

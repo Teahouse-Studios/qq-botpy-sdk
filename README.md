@@ -43,6 +43,7 @@
 - 检测 Opcode 11 Heartbeat ACK，超时后主动恢复连接。
 - 支持 Identify、Resume、服务端重连指令和 Invalid Session。
 - 按关闭码选择刷新 Token、清理 Session、退避重连或停止。
+- 重连期间暂停消息发送，待所有分片 READY/RESUMED 后继续。
 - 支持 JSON 文件或自定义 Store 持久化 Gateway Session。
 - 支持 WebSocket、内置 Webhook 服务和自定义事件传输适配器。
 - Webhook 支持回调地址验证、Ed25519 验签和事件 ACK。
@@ -54,6 +55,7 @@
 - 结构化 API、认证、限流和传输异常。
 - 解析 `Retry-After`，安全方法支持指数退避。
 - POST/PATCH 默认不自动重试，避免非幂等消息重复发送。
+- C2C/群聊仅带 `msg_id` 的被动回复会对不确定的传输失败重试一次。
 - 可配置 API 地址、Token 地址、User-Agent 和 SSLContext/私有 CA。
 - 通过 `client.api.request/get/post/put/patch/delete()` 调用尚未封装的 REST API。
 
@@ -115,10 +117,10 @@ import botpy
 pip install "git+https://github.com/Teahouse-Studios/qq-botpy-sdk.git"
 ```
 
-Poetry 项目可以使用：
+uv 项目可以使用：
 
 ```bash
-poetry add "git+https://github.com/Teahouse-Studios/qq-botpy-sdk.git"
+uv add "qq-botpy-sdk @ git+https://github.com/Teahouse-Studios/qq-botpy-sdk.git"
 ```
 
 > `qq-botpy-sdk` 是当前独立维护版的发布包名。历史 `qq-botpy` 包属于不同的发布来源，不代表本仓库。
@@ -128,7 +130,7 @@ poetry add "git+https://github.com/Teahouse-Studios/qq-botpy-sdk.git"
 ```bash
 git clone https://github.com/Teahouse-Studios/qq-botpy-sdk.git
 cd qq-botpy-sdk
-poetry install
+uv sync
 ```
 
 ## 快速开始
@@ -187,6 +189,19 @@ client = MyClient(
 
 进程重启后，客户端会优先尝试 Resume，并从保存的序列号之后补发事件。失效、过期或分片数量不匹配的
 Session 会被自动清理。
+
+### 重连期间的消息发送
+
+```python
+client = MyClient(
+    intents=intents,
+    gateway_send_timeout=30.0,
+)
+```
+
+WebSocket 模式下，Gateway 正在连接或重连时，消息会等待所有已注册分片恢复，不会立即发出 HTTP
+请求。`gateway_send_timeout` 默认为 30 秒；设为 `None` 可一直等待，设为 `0` 则立即失败。首次请求前
+等待超时时，`TransportError.attempts` 为 `0`；若重试等待超时，则保留此前实际请求次数。
 
 ### Webhook 模式
 
@@ -350,13 +365,13 @@ client = MyClient(
 安装依赖：
 
 ```bash
-poetry install
+uv sync
 ```
 
 运行纯本地测试：
 
 ```bash
-poetry run python -m unittest discover -s tests -p "test_[!a]*.py"
+uv run python -m unittest discover -s tests -p "test_[!a]*.py"
 ```
 
 `tests/test_api.py` 使用真实平台凭证，并包含创建、修改或删除线上资源的 API 测试。除非你明确准备了隔离的
@@ -365,8 +380,9 @@ poetry run python -m unittest discover -s tests -p "test_[!a]*.py"
 编译和项目元数据检查：
 
 ```bash
-poetry run python -m compileall -q botpy examples
-poetry check
+uv run python -m compileall -q botpy examples
+uv lock --check
+uv build
 ```
 
 ## 当前限制
