@@ -5,7 +5,7 @@ import botpy
 from botpy import BotAPI
 
 from botpy.message import Message
-from botpy.types.inline import Keyboard, Button, RenderData, Action, Permission, KeyboardRow
+from botpy.types.inline import Keyboard, Button, RenderData, Action, Permission, KeyboardRow, KeyboardContent
 from botpy.types.message import MarkdownPayload, KeyboardPayload
 from botpy.ext.cog_yaml import read
 
@@ -47,7 +47,7 @@ def build_a_demo_keyboard() -> Keyboard:
     )
 
     row1 = KeyboardRow(buttons=[button1])
-    return Keyboard(rows=[row1])
+    return Keyboard(content=KeyboardContent(rows=[row1]))
 
 
 if __name__ == "__main__":
