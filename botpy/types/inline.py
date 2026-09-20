@@ -30,6 +30,8 @@ class Button(TypedDict):
 class KeyboardRow(TypedDict):
     buttons: List[Button]
 
+class KeyboardContent(TypedDict):
+    rows: List[KeyboardRow]
 
 class Keyboard(TypedDict):
-    rows: List[KeyboardRow]
+    content: KeyboardContent
