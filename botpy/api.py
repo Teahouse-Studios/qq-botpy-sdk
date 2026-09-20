@@ -2347,7 +2347,12 @@ class BotAPI:
         block_size: int,
         md5: str,
     ):
-        """确认一个媒体分片已经上传完成。"""
+        """确认一个媒体分片已经上传完成。
+
+        ``part_index`` 采用 1-based 索引、``block_size`` 为 JSON 数字。
+        接口文档示例写的是 ``part_index=0`` 与字符串 ``block_size``，
+        但实际可用接口要求 1-based + 数字，这里以实际接口行为为准。
+        """
 
         if scope == "c2c":
             route = Route("POST", "/v2/users/{target_id}/upload_part_finish", target_id=target_id)
@@ -2357,8 +2362,8 @@ class BotAPI:
             raise ValueError("chunked upload is only supported for c2c and group targets")
         payload = {
             "upload_id": upload_id,
-            "part_index": part_index,
-            "block_size": block_size,
+            "part_index": int(part_index),
+            "block_size": int(block_size),
             "md5": md5,
         }
         return await self._http.request(route, json=payload, timeout=120, retry_unsafe=True)

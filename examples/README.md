@@ -27,6 +27,7 @@ examples/
 ├── demo_schedule.py             # 机器人日程相关示例
 ├── demo_group_reply_text.py     # 机器人群内发消息相关示例
 ├── demo_group_reply_file.py     # 机器人群内发富媒体消息相关示例
+├── demo_group_reply_markdown_image.py  # 机器人群内发送 Markdown 图片临时直链示例
 ├── demo_group_manage_event.py   # 机器人群管理事件
 ├── demo_c2c_reply_text.py       # 机器人好友内发消息相关示例
 ├── demo_c2c_reply_file.py       # 机器人好友内发富媒体消息相关示例 

@@ -252,6 +252,15 @@ result = await client.send_image(
 )
 
 print(result.upload["file_info"], result.message["id"])
+
+# Markdown 图片等场景需要 URL：upload_media_url 强制分片上传并返回临时直链
+uploaded = await client.upload_media_url(
+    context.reply_target,
+    MediaFileType.IMAGE,
+    local_path="./image.png",
+)
+
+print(uploaded.raw_url, uploaded.ttl)
 ```
 
 ### C2C 流式消息

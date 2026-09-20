@@ -28,6 +28,7 @@ from .protocol.message import (
     MEDIA_FILE_SIZE_LIMITS,
     MediaFileType,
     MediaSendResult,
+    MediaUrlResult,
     MessageType,
 )
 from .protocol.models import InboundMessage, InteractionContext, RawEvent, ReplyTarget
@@ -40,6 +41,25 @@ from .protocol.upload_cache import UploadCache, compute_file_hash
 from .robot import Robot, Token
 
 _log = logging.get_logger()
+
+
+def _coerce_ttl(value: Any) -> int:
+    """把平台返回的剩余有效期归一化为整数秒；无法解析时按 ``0``（长期有效）处理。"""
+
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float):
+        return max(int(value), 0)
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return max(int(float(text)), 0)
+        except ValueError:
+            return 0
+    return 0
+
 
 _LEGACY_EVENT_CALLBACKS = {
     "group_member_add": "message_group_member_add",
@@ -489,9 +509,78 @@ class Client:
         file_name: Optional[str] = None,
         srv_send_msg: bool = False,
         on_progress: Optional[ProgressCallback] = None,
-    ):
-        """上传媒体；bytes/本地文件达到 5 MiB 时自动切换到分片协议。"""
+        force_chunked: bool = False,
+    ) -> Mapping[str, Any]:
+        """上传媒体；bytes/本地文件达到 5 MiB 或 ``force_chunked=True`` 时使用分片协议。"""
 
+        return await Client._upload_media(
+            self,
+            target,
+            file_type,
+            url=url,
+            file_data=file_data,
+            data=data,
+            local_path=local_path,
+            file_name=file_name,
+            srv_send_msg=srv_send_msg,
+            on_progress=on_progress,
+            force_chunked=force_chunked,
+            require_raw_url=False,
+        )
+
+    async def upload_media_url(
+        self,
+        target: ReplyTarget,
+        file_type: Union[int, MediaFileType],
+        *,
+        url: Optional[str] = None,
+        file_data: Optional[str] = None,
+        data: Optional[bytes] = None,
+        local_path: Optional[Union[str, Path]] = None,
+        file_name: Optional[str] = None,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> MediaUrlResult:
+        """强制使用分片协议上传并返回平台临时直链 ``raw_url``。
+
+        适用于 Markdown 图片等需要 URL 而非 ``file_info`` 的场景。``url`` 源无法计算
+        内容摘要，因此不支持；需要直链时请传 ``data``、``file_data`` 或 ``local_path``。
+        平台未返回 ``raw_url`` 时抛出 ``RuntimeError``。
+        """
+
+        response = await Client._upload_media(
+            self,
+            target,
+            file_type,
+            url=url,
+            file_data=file_data,
+            data=data,
+            local_path=local_path,
+            file_name=file_name,
+            srv_send_msg=False,
+            on_progress=on_progress,
+            force_chunked=True,
+            require_raw_url=True,
+        )
+        raw_url = response.get("raw_url") if isinstance(response, Mapping) else None
+        if not isinstance(raw_url, str) or not raw_url:
+            raise RuntimeError("media upload response does not contain raw_url")
+        return MediaUrlResult(upload=response, raw_url=raw_url, ttl=_coerce_ttl(response.get("ttl")))
+
+    async def _upload_media(
+        self,
+        target: ReplyTarget,
+        file_type: Union[int, MediaFileType],
+        *,
+        url: Optional[str] = None,
+        file_data: Optional[str] = None,
+        data: Optional[bytes] = None,
+        local_path: Optional[Union[str, Path]] = None,
+        file_name: Optional[str] = None,
+        srv_send_msg: bool = False,
+        on_progress: Optional[ProgressCallback] = None,
+        force_chunked: bool = False,
+        require_raw_url: bool = False,
+    ) -> Mapping[str, Any]:
         if target.scope not in ("c2c", "group"):
             raise ValueError("media upload is only supported for c2c and group targets")
         try:
@@ -500,10 +589,16 @@ class Client:
             raise ValueError("file_type must be a valid MediaFileType") from exc
         if isinstance(file_type, bool):
             raise ValueError("file_type must be a valid MediaFileType")
+        if not isinstance(force_chunked, bool):
+            raise TypeError("force_chunked must be a boolean")
 
         sources = (url, file_data, data, local_path)
         if sum(source is not None for source in sources) != 1:
             raise ValueError("exactly one of url, file_data, data, or local_path is required")
+        if force_chunked and url is not None:
+            if require_raw_url:
+                raise ValueError("upload_media_url does not support url sources")
+            raise ValueError("force_chunked is not supported for url uploads")
         if on_progress is not None and not callable(on_progress):
             raise TypeError("on_progress must be callable")
 
@@ -514,15 +609,21 @@ class Client:
             if not isinstance(url, str) or not url.strip():
                 raise ValueError("url must be a non-empty string")
         elif file_data is not None:
-            raw_file_data = Client._decode_base64_upload(file_data)
-            content_hash = compute_file_hash(raw_file_data)
+            if force_chunked:
+                raw_file_data = Client._decode_base64(file_data)
+                Client._validate_media_size(normalized_type, len(raw_file_data))
+                content_hash = compute_file_hash(raw_file_data)
+                chunked_data = raw_file_data
+            else:
+                raw_file_data = Client._decode_base64_upload(file_data)
+                content_hash = compute_file_hash(raw_file_data)
         elif data is not None:
             if not isinstance(data, bytes):
                 raise TypeError("data must be bytes")
             size = len(data)
             Client._validate_media_size(normalized_type, size)
             content_hash = compute_file_hash(data)
-            if size >= LARGE_MEDIA_THRESHOLD:
+            if force_chunked or size >= LARGE_MEDIA_THRESHOLD:
                 chunked_data = data
             else:
                 Client._validate_upload_size(size)
@@ -535,7 +636,7 @@ class Client:
             Client._validate_media_size(normalized_type, size)
             if file_name is None:
                 file_name = path.name
-            if size >= LARGE_MEDIA_THRESHOLD:
+            if force_chunked or size >= LARGE_MEDIA_THRESHOLD:
                 chunked_path = path
             else:
                 Client._validate_upload_size(size)
@@ -549,9 +650,9 @@ class Client:
             upload_cache = UploadCache(logger=_log)
             self._upload_cache = upload_cache
         if content_hash is not None:
-            cached = upload_cache.get(content_hash, target.scope, target.target_id, normalized_type)
-            if cached is not None:
-                return {"file_uuid": "", "file_info": cached, "ttl": 0, "cached": True}
+            cached = upload_cache.get_response(content_hash, target.scope, target.target_id, normalized_type)
+            if cached is not None and (not require_raw_url or cached.get("raw_url")):
+                return {**cached, "cached": True}
 
         if chunked_data is not None or chunked_path is not None:
             if srv_send_msg:
@@ -568,6 +669,7 @@ class Client:
                 local_path=chunked_path,
                 file_name=file_name,
                 on_progress=on_progress,
+                require_raw_url=require_raw_url,
             )
 
         if file_name is None and url and normalized_type == MediaFileType.FILE:
@@ -665,7 +767,9 @@ class Client:
         Client._decode_base64_upload(file_data)
 
     @staticmethod
-    def _decode_base64_upload(file_data: str) -> bytes:
+    def _decode_base64(file_data: str) -> bytes:
+        """解码 ``file_data``，只校验 base64 合法性，不做大小限制。"""
+
         if not isinstance(file_data, str) or not file_data:
             raise ValueError("file_data must be a non-empty base64 string")
         try:
@@ -673,9 +777,13 @@ class Client:
         except UnicodeEncodeError as exc:
             raise ValueError("file_data must contain ASCII base64 data") from exc
         try:
-            decoded = base64.b64decode(encoded, validate=True)
+            return base64.b64decode(encoded, validate=True)
         except (ValueError, base64.binascii.Error) as exc:
             raise ValueError("file_data must be valid base64 data") from exc
+
+    @staticmethod
+    def _decode_base64_upload(file_data: str) -> bytes:
+        decoded = Client._decode_base64(file_data)
         Client._validate_media_size(MediaFileType.FILE, len(decoded))
         Client._validate_upload_size(len(decoded))
         return decoded

@@ -45,9 +45,19 @@
 ## 媒体上传
 
 - 空文件、超出媒体类型限制的文件、符号链接和非法文件名会在请求前被拒绝。
-- bytes 和本地文件达到 5 MiB 时自动使用分片协议。
-- 相同内容只会在相同 scope、target 和 file type 下复用 `file_info`，并在服务端 TTL 前 60 秒失效。
+- bytes、base64 和本地文件达到 5 MiB 时自动使用分片协议；`upload_media(..., force_chunked=True)`
+  可对小文件强制分片，`url` 源不支持强制分片。
+- `upload_media_url()` 强制分片上传并返回 `MediaUrlResult(upload, raw_url, ttl)`，用于 Markdown 等需要
+  临时直链的场景；平台未返回 `raw_url` 时抛出 `RuntimeError`。
+- 相同内容只会在相同 scope、target 和 file type 下复用上传结果，并在服务端 TTL 前 60 秒失效。
+- 缓存现在保存完整响应字段（`file_info`、`file_uuid`、`ttl`、`raw_url`）。命中缓存时返回的 `ttl`
+  是剩余有效秒数而不是 `0`；`UploadCache.get_response()` 是读取完整字段的入口，`get()` 仍只返回
+  `file_info`。`upload_media_url()` 不会复用缺少 `raw_url` 的缓存条目。
 - 缓存仅适用于 SDK 能计算内容摘要的 bytes、base64 和本地文件；URL 上传不会缓存。
+- `upload_prepare` 响应中的 `block_size` 允许是字符串，`concurrency` 与 `retry_timeout` 允许位于
+  `upload_config` 子对象，`parts[].index` 允许是 0-based 或 1-based；SDK 统一归一化为整数和
+  1-based 索引。`upload_part_finish` 以实际接口行为为准发送 1-based 索引与 JSON 数字。
+- `Media` 新增可选字段 `raw_url: NotRequired[str]`，表示随 `ttl` 过期的临时直链。
 
 ## 新增入口
 

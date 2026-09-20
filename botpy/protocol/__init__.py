@@ -34,6 +34,7 @@ from .message import (
     MEDIA_FILE_SIZE_LIMITS,
     MediaFileType,
     MediaSendResult,
+    MediaUrlResult,
     MessageType,
 )
 from .models import InboundAttachment, InboundMessage, InteractionContext, RawEvent, ReplyTarget, SessionState
@@ -101,6 +102,7 @@ __all__ = (
     "MEDIA_FILE_SIZE_LIMITS",
     "MediaFileType",
     "MediaSendResult",
+    "MediaUrlResult",
     "MessageType",
     "ProgressCallback",
     "ParsedTarget",

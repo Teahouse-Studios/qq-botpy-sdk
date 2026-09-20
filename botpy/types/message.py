@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from enum import Enum
-from typing import List, TypedDict
+from typing import List, NotRequired, TypedDict
 
 from .gateway import MessagePayload
 from .inline import Keyboard
@@ -65,10 +65,12 @@ class KeyboardPayload(TypedDict, total=False):
     id: str
     content: Keyboard
 
+
 class Media(TypedDict):
     file_uuid: str  # 文件ID
     file_info: str  # 文件信息，用于发消息接口的media字段使用
     ttl: int  # 有效期，标识剩余多少秒到期，到期后 file_info 失效，当等于 0 时，表示可长期使用
+    raw_url: NotRequired[str]  # 临时直链，可用于 Markdown 图片等内容；仅在平台返回时存在，随 ttl 过期
 
 
 class Message(MessagePayload):

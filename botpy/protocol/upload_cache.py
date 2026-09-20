@@ -2,7 +2,7 @@ import hashlib
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Optional, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 from .message import MediaFileType
 from .models import ChatScope
@@ -31,10 +31,11 @@ class _UploadCacheEntry:
     file_info: str
     file_uuid: str
     expires_at: float
+    raw_url: Optional[str] = None
 
 
 class UploadCache:
-    """按内容、目标和媒体类型缓存平台返回的 ``file_info``。"""
+    """按内容、目标和媒体类型缓存平台返回的上传响应字段。"""
 
     def __init__(
         self,
@@ -65,17 +66,42 @@ class UploadCache:
         target_id: str,
         file_type: Union[int, MediaFileType],
     ) -> Optional[str]:
+        """返回缓存的 ``file_info``；未命中或已过期时返回 ``None``。"""
+
+        cached = self.get_response(content_hash, scope, target_id, file_type)
+        return None if cached is None else cached["file_info"]
+
+    def get_response(
+        self,
+        content_hash: str,
+        scope: ChatScope,
+        target_id: str,
+        file_type: Union[int, MediaFileType],
+    ) -> Optional[Dict[str, Any]]:
+        """返回缓存的完整响应字段（含 ``raw_url``）；未命中或已过期时返回 ``None``。
+
+        ``ttl`` 是相对当前时刻的剩余有效期，因此命中缓存的响应不会报告已经过期的时长。
+        """
+
         key = self._key(content_hash, scope, target_id, file_type)
         entry = self._entries.get(key)
         if entry is None:
             return None
-        if self._clock() >= entry.expires_at:
+        remaining = entry.expires_at - self._clock()
+        if remaining <= 0:
             self._entries.pop(key, None)
             return None
         self._entries.move_to_end(key)
         if self._logger is not None:
             self._logger.debug("[botpy] upload cache hit uuid=%s", entry.file_uuid)
-        return entry.file_info
+        response = {
+            "file_uuid": entry.file_uuid,
+            "file_info": entry.file_info,
+            "ttl": int(remaining),
+        }
+        if entry.raw_url:
+            response["raw_url"] = entry.raw_url
+        return response
 
     def set(
         self,
@@ -86,6 +112,8 @@ class UploadCache:
         file_info: str,
         file_uuid: str,
         ttl: Union[int, float],
+        *,
+        raw_url: Optional[str] = None,
     ) -> None:
         if not isinstance(file_info, str) or not file_info:
             return
@@ -111,6 +139,7 @@ class UploadCache:
             file_info=file_info,
             file_uuid=file_uuid if isinstance(file_uuid, str) else "",
             expires_at=self._clock() + effective_ttl,
+            raw_url=raw_url if isinstance(raw_url, str) and raw_url else None,
         )
         self._entries.move_to_end(key)
 
@@ -130,6 +159,7 @@ class UploadCache:
             response.get("file_info"),
             response.get("file_uuid", ""),
             response.get("ttl", 0),
+            raw_url=response.get("raw_url"),
         )
 
     def stats(self) -> UploadCacheStats:

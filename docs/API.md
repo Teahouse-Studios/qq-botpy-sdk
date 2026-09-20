@@ -56,10 +56,28 @@ await client.send_image(target, local_path="cat.png")
 await client.send_video(target, data=video_bytes, on_progress=progress)
 await client.send_voice(target, url="https://example.com/voice.silk")
 await client.send_file(target, local_path="report.pdf", content="报告")
+
+# 小文件也强制走分片协议
+await client.upload_media(target, MediaFileType.IMAGE, data=png_bytes, force_chunked=True)
+
+# 获取 Markdown 可用的临时直链
+uploaded = await client.upload_media_url(target, MediaFileType.IMAGE, data=png_bytes)
+markdown = format_qqbot_markdown_image(uploaded.raw_url)
 ```
 
 `upload_media()` 返回上传响应；`send_media()` 和四个类型便捷方法返回 `MediaSendResult(upload, message)`。
-相同 bytes、base64 或本地文件会按内容 MD5、聊天 scope、目标和媒体类型缓存。
+相同 bytes、base64 或本地文件会按内容 MD5、聊天 scope、目标和媒体类型缓存；缓存保留
+`file_info`、`file_uuid`、`ttl` 和 `raw_url`，因此 Markdown 直链同样可以复用。
+
+bytes、base64 和本地文件达到 5 MiB 时自动使用分片协议，`force_chunked=True` 可对小文件强制分片。
+`upload_media_url()` 始终使用分片协议并要求平台返回 `raw_url`，返回
+`MediaUrlResult(upload, raw_url, ttl)`；`url` 源没有本地内容摘要，不能用于该入口，平台未返回
+直链时抛出 `RuntimeError`。
+
+分片协议对平台返回做了兼容处理：`block_size` 可能是字符串，`concurrency` 与 `retry_timeout` 可能位于
+`upload_config` 子对象，`parts[].index` 可能从 0 或 1 开始。SDK 统一归一化为整数和 1-based 索引，并在
+`upload_part_finish` 中按实际接口要求发送 JSON 数字（接口文档示例中的 `part_index=0` 与字符串
+`block_size` 不可用）。
 
 ## 通用 REST API
 

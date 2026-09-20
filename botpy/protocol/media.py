@@ -84,6 +84,7 @@ class ChunkedMediaUploader:
         local_path: Optional[Union[str, Path]] = None,
         file_name: Optional[str] = None,
         on_progress: Optional[ProgressCallback] = None,
+        require_raw_url: bool = False,
     ) -> Mapping[str, Any]:
         if scope not in ("c2c", "group"):
             raise ValueError("chunked upload is only supported for c2c and group targets")
@@ -95,6 +96,8 @@ class ChunkedMediaUploader:
             raise TypeError("file_name must be a string")
         if on_progress is not None and not callable(on_progress):
             raise TypeError("on_progress must be callable")
+        if not isinstance(require_raw_url, bool):
+            raise TypeError("require_raw_url must be a boolean")
         try:
             normalized_type = MediaFileType(file_type)
         except (TypeError, ValueError) as exc:
@@ -124,9 +127,9 @@ class ChunkedMediaUploader:
             else await asyncio.to_thread(_hash_file, path)
         )
         if self.upload_cache is not None:
-            cached = self.upload_cache.get(hashes.md5, scope, target_id, normalized_type)
-            if cached is not None:
-                return {"file_uuid": "", "file_info": cached, "ttl": 0, "cached": True}
+            cached = self.upload_cache.get_response(hashes.md5, scope, target_id, normalized_type)
+            if cached is not None and (not require_raw_url or cached.get("raw_url")):
+                return {**cached, "cached": True}
         prepare_name = _sanitize_file_name(display_name) if normalized_type == MediaFileType.FILE else display_name
         try:
             prepared = await self.api.post_upload_prepare(
@@ -211,6 +214,8 @@ class ChunkedMediaUploader:
         deadline = self._clock() + retry_timeout
         while True:
             try:
+                # 接口文档示例写 part_index=0、block_size 为字符串，但实际可用接口
+                # 要求 1-based 索引和 JSON 数字；这里以实际接口行为为准发送。
                 await self.api.post_upload_part_finish(
                     scope,
                     target_id,
@@ -249,29 +254,59 @@ def _parse_prepare_response(
     response: Mapping[str, Any],
     file_size: int,
 ) -> tuple[str, int, list[_UploadPart], int, float]:
+    """解析 ``upload_prepare`` 响应，兼容平台实际返回的多种字段形态。
+
+    平台文档与线上实现存在差异，这里统一按“宽进严出”处理：
+
+    - ``block_size`` 既可能是整数，也可能是 ``"10485760"`` 这样的字符串；
+      也可能与 ``concurrency`` / ``retry_timeout`` 一起放在 ``upload_config`` 子对象中。
+    - ``parts[].index`` 文档示例从 0 开始，实际接口也可能从 1 开始；
+      解析后一律归一化为 1-based，供后续 ``upload_part_finish`` 使用。
+    """
+
     if not isinstance(response, Mapping):
         raise ValueError("upload_prepare returned a non-object response")
     upload_id = response.get("upload_id")
-    block_size = response.get("block_size")
+    raw_config = response.get("upload_config")
+    config: Mapping[str, Any] = raw_config if isinstance(raw_config, Mapping) else {}
+    block_size = _coerce_int(_first_present(response.get("block_size"), config.get("block_size")))
     raw_parts = response.get("parts")
     if not isinstance(upload_id, str) or not upload_id:
         raise ValueError("upload_prepare response is missing upload_id")
-    if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size <= 0:
+    if block_size is None or block_size <= 0:
         raise ValueError("upload_prepare response contains an invalid block_size")
     if not isinstance(raw_parts, list) or not raw_parts:
         raise ValueError("upload_prepare response is missing parts")
 
-    parts = []
-    seen_indexes = set()
+    raw_indexes = []
+    raw_urls = []
     for raw_part in raw_parts:
         if not isinstance(raw_part, Mapping):
             raise ValueError("upload_prepare response contains an invalid part")
-        index = raw_part.get("index")
+        index = _coerce_int(raw_part.get("index"))
         url = raw_part.get("presigned_url")
-        if not isinstance(index, int) or isinstance(index, bool) or index < 1 or index in seen_indexes:
+        if index is None or index < 0:
             raise ValueError("upload_prepare response contains an invalid part index")
         if not isinstance(url, str) or not url.startswith(("https://", "http://")):
             raise ValueError("upload_prepare response contains an invalid presigned_url")
+        raw_indexes.append(index)
+        raw_urls.append(url)
+
+    # 文档示例是 0-based，实际接口既有 0-based 也有 1-based；归一化为 1-based。
+    first_index = min(raw_indexes)
+    if first_index == 0:
+        index_offset = 1
+    elif first_index == 1:
+        index_offset = 0
+    else:
+        raise ValueError("upload_prepare response contains an invalid part index")
+
+    parts = []
+    seen_indexes = set()
+    for index, url in zip(raw_indexes, raw_urls):
+        index += index_offset
+        if index in seen_indexes:
+            raise ValueError("upload_prepare response contains an invalid part index")
         if (index - 1) * block_size >= file_size:
             raise ValueError("upload_prepare response contains a part outside the source file")
         seen_indexes.add(index)
@@ -282,21 +317,56 @@ def _parse_prepare_response(
         raise ValueError("upload_prepare response parts do not cover the complete source file")
     parts.sort(key=lambda part: part.index)
 
-    concurrency = response.get("concurrency", DEFAULT_CONCURRENT_PARTS)
-    if not isinstance(concurrency, int) or isinstance(concurrency, bool) or concurrency <= 0:
+    concurrency = _coerce_int(_first_present(config.get("concurrency"), response.get("concurrency")))
+    if concurrency is None or concurrency <= 0:
         concurrency = DEFAULT_CONCURRENT_PARTS
     concurrency = min(concurrency, MAX_CONCURRENT_PARTS)
 
-    raw_retry_timeout = response.get("retry_timeout")
-    if (
-        isinstance(raw_retry_timeout, (int, float))
-        and not isinstance(raw_retry_timeout, bool)
-        and raw_retry_timeout > 0
-    ):
+    raw_retry_timeout = _coerce_number(_first_present(config.get("retry_timeout"), response.get("retry_timeout")))
+    if raw_retry_timeout is not None and raw_retry_timeout > 0:
         retry_timeout = min(max(float(raw_retry_timeout), 0.0), MAX_PART_FINISH_RETRY_TIMEOUT)
     else:
         retry_timeout = DEFAULT_PART_FINISH_RETRY_TIMEOUT
     return upload_id, block_size, parts, concurrency, retry_timeout
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    """把平台可能返回的 ``int`` / ``"10485760"`` / ``10485760.0`` 归一化为整数。"""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("+-").isdigit():
+            return int(text)
+    return None
+
+
+def _coerce_number(value: Any) -> Optional[float]:
+    """把平台可能返回的数字或数字字符串归一化为 ``float``。"""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
 
 
 def _hash_bytes(data: bytes) -> UploadHashes:

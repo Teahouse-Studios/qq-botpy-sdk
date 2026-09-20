@@ -41,3 +41,16 @@ class MediaSendResult:
 
     upload: Mapping[str, Any]
     message: Any
+
+
+@dataclass(frozen=True)
+class MediaUrlResult:
+    """一次“上传并获取临时直链”操作的结果。
+
+    ``raw_url`` 是平台返回的临时直链，可直接用于 Markdown 图片等内容；
+    ``ttl`` 为剩余有效秒数，``0`` 表示平台未给出有效期。
+    """
+
+    upload: Mapping[str, Any]
+    raw_url: str
+    ttl: int

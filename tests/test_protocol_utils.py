@@ -21,6 +21,7 @@ from botpy.protocol import (
     pcm_to_wav,
     strip_amr_header,
 )
+from botpy.types.message import Media
 
 
 class UploadCacheTests(unittest.TestCase):
@@ -43,6 +44,54 @@ class UploadCacheTests(unittest.TestCase):
 
         self.assertEqual(2, cache.stats().size)
         self.assertIsNone(cache.get("0", "c2c", "user", 1))
+
+    def test_cache_response_keeps_raw_url_and_reports_remaining_ttl(self):
+        now = [100.0]
+        cache = UploadCache(clock=lambda: now[0], safety_margin=0)
+        digest = compute_file_hash(b"same")
+
+        cache.set(
+            digest,
+            "c2c",
+            "user",
+            MediaFileType.IMAGE,
+            "info",
+            "uuid",
+            120,
+            raw_url="https://example.com/raw",
+        )
+
+        self.assertEqual(
+            {
+                "file_uuid": "uuid",
+                "file_info": "info",
+                "ttl": 120,
+                "raw_url": "https://example.com/raw",
+            },
+            cache.get_response(digest, "c2c", "user", MediaFileType.IMAGE),
+        )
+        now[0] = 130.0
+        self.assertEqual(90, cache.get_response(digest, "c2c", "user", MediaFileType.IMAGE)["ttl"])
+        self.assertEqual("info", cache.get(digest, "c2c", "user", MediaFileType.IMAGE))
+        now[0] = 221.0
+        self.assertIsNone(cache.get_response(digest, "c2c", "user", MediaFileType.IMAGE))
+        self.assertIsNone(cache.get(digest, "c2c", "user", MediaFileType.IMAGE))
+
+    def test_cache_response_omits_missing_raw_url(self):
+        cache = UploadCache(safety_margin=0)
+        digest = compute_file_hash(b"same")
+
+        cache.set(digest, "group", "group", MediaFileType.FILE, "info", "", 60)
+
+        response = cache.get_response(digest, "group", "group", MediaFileType.FILE)
+        self.assertEqual("", response["file_uuid"])
+        self.assertNotIn("raw_url", response)
+
+
+class MediaTypeTests(unittest.TestCase):
+    def test_media_type_declares_optional_raw_url(self):
+        self.assertIn("raw_url", Media.__optional_keys__)
+        self.assertEqual({"file_uuid", "file_info", "ttl"}, set(Media.__required_keys__))
 
 
 class ReplyLimiterTests(unittest.TestCase):
