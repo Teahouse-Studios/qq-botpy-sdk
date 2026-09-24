@@ -56,7 +56,18 @@ NORMALIZED_SENSITIVE_LOG_KEYS = {
 
 def _safe_url(url: str) -> str:
     parsed = urlsplit(url)
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    # Never expose credentials or signed query strings through diagnostics.
+    # ``urlsplit().netloc`` may contain userinfo, so rebuild it from the
+    # parsed host and port instead of logging it verbatim.
+    host = parsed.hostname or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 def _redact_log_value(value: Any, depth: int = 0) -> Any:
@@ -133,6 +144,14 @@ class ApiClient:
     ) -> None:
         self.token_provider = token_provider
         self.base_url = base_url.rstrip("/")
+        base = urlsplit(self.base_url)
+        if (
+            base.scheme.lower() not in {"http", "https"}
+            or not base.netloc
+            or base.username is not None
+            or base.password is not None
+        ):
+            raise ValueError("base_url must be an http(s) URL without userinfo")
         self.timeout = timeout
         self.max_retries = max(0, max_retries)
         self.retry_base_delay = max(0, retry_base_delay)
@@ -144,6 +163,10 @@ class ApiClient:
         self._logger = logger or logging.getLogger("botpy.protocol.http")
         self._sleep = sleep
         self.ssl = ssl
+        if not isinstance(user_agent, str) or any(
+            ord(character) < 32 or ord(character) == 127 for character in user_agent
+        ):
+            raise ValueError("user_agent must not contain control characters")
         self._closed = False
 
     async def close(self) -> None:
@@ -187,14 +210,14 @@ class ApiClient:
     ) -> Any:
         self._ensure_open()
         method = method.upper()
-        url = self._build_url(path)
+        url = self._build_url(path, auth=auth)
         log_url = _safe_url(url)
         max_retries = self.max_retries if retries is None else max(0, retries)
         can_retry_status = method in SAFE_METHODS or retry_unsafe
         can_retry_transport = can_retry_status or retry_ambiguous
         request_headers: Dict[str, str] = dict(headers or {})
         request_headers.setdefault("User-Agent", self.user_agent)
-        caller_supplied_authorization = "Authorization" in request_headers
+        caller_supplied_authorization = any(key.casefold() == "authorization" for key in request_headers)
         token_was_refreshed = False
 
         if auth:
@@ -220,7 +243,7 @@ class ApiClient:
                     raise TransportError(
                         f"HTTP {method} retry aborted before another request attempt",
                         method=method,
-                        url=url,
+                        url=log_url,
                         cause=exc,
                         attempts=request_attempts,
                     ) from exc
@@ -272,7 +295,7 @@ class ApiClient:
                     payload=payload,
                     trace_id=trace_id,
                     method=method,
-                    url=url,
+                    url=log_url,
                     retry_after=retry_after,
                 )
                 retryable_status = response.status_code == 429 or response.status_code >= 500
@@ -320,7 +343,7 @@ class ApiClient:
         raise TransportError(
             f"HTTP {method} request failed",
             method=method,
-            url=url,
+            url=log_url,
             cause=last_error,
             attempts=request_attempts,
         ) from last_error
@@ -350,10 +373,37 @@ class ApiClient:
         if self._closed:
             raise RuntimeError("HTTP client is closed")
 
-    def _build_url(self, path: str) -> str:
-        if path.startswith("https://") or path.startswith("http://"):
+    def _build_url(self, path: str, *, auth: bool = True) -> str:
+        if not isinstance(path, str) or not path:
+            raise ValueError("path must be a non-empty string")
+        if any(ord(character) < 32 or ord(character) == 127 for character in path):
+            raise ValueError("request path must not contain control characters")
+        parsed = urlsplit(path)
+        if parsed.scheme or parsed.netloc:
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("absolute request URLs must use http or https")
+            if parsed.username is not None or parsed.password is not None:
+                raise ValueError("request URLs must not contain userinfo")
+            if auth:
+                base = urlsplit(self.base_url)
+                request_origin = (
+                    parsed.scheme.lower(),
+                    parsed.hostname,
+                    parsed.port or self._default_port(parsed.scheme),
+                )
+                base_origin = (
+                    base.scheme.lower(),
+                    base.hostname,
+                    base.port or self._default_port(base.scheme),
+                )
+                if request_origin != base_origin:
+                    raise ValueError("authenticated requests must target the configured API origin")
             return path
         return f"{self.base_url}/{path.lstrip('/')}"
+
+    @staticmethod
+    def _default_port(scheme: str) -> int:
+        return 443 if scheme.lower() == "https" else 80
 
     def _delay(self, attempt: int) -> float:
         return self.retry_base_delay * (2**attempt)

@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 import asyncio
 from typing import Any, Awaitable, Callable, Optional, ClassVar, Dict
+from urllib.parse import quote
 
 from . import logging
 from .errors import HttpErrorDict, ServerError
 from .protocol.errors import ApiError
-from .protocol.http import ApiClient
+from .protocol.http import ApiClient, _safe_url
 from .robot import Token
 from .types import robot
 
@@ -18,10 +19,23 @@ class Route:
     SCHEME: ClassVar[str] = "https"
 
     def __init__(self, method: str, path: str, is_sandbox: str = False, **parameters: Any) -> None:
-        self.method: str = method
+        if not isinstance(method, str) or not method or not method.isascii() or not method.isalpha():
+            raise ValueError("HTTP method must contain ASCII letters only")
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError("route path must start with '/'")
+        if any(ord(character) < 32 or ord(character) == 127 for character in path):
+            raise ValueError("route path must not contain control characters")
+        self.method: str = method.upper()
         self.path: str = path
         self.is_sandbox = is_sandbox
         self.parameters = parameters
+
+    @property
+    def formatted_path(self) -> str:
+        """Return the route with path parameters safely percent-encoded."""
+
+        encoded = {key: quote(str(value), safe="") for key, value in self.parameters.items()}
+        return self.path.format_map(encoded)
 
     @property
     def url(self):
@@ -29,12 +43,7 @@ class Route:
             d = self.SANDBOX_DOMAIN
         else:
             d = self.DOMAIN
-        _url = "{}://{}{}".format(self.SCHEME, d, self.path)
-
-        # path的参数:
-        if self.parameters:
-            _url = _url.format_map(self.parameters)
-        return _url
+        return "{}://{}{}".format(self.SCHEME, d, self.formatted_path)
 
 
 class BotHttp:
@@ -127,7 +136,7 @@ class BotHttp:
                     if isinstance(value, dict):
                         if key == "message_reference":
                             _log.error(
-                                f"[botpy] 接口参数传入异常, 请求连接: {route.url}, "
+                                f"[botpy] 接口参数传入异常, 请求连接: {_safe_url(route.url)}, "
                                 f"错误原因: file_image与message_reference不能同时传入，"
                                 f"备注: sdk已按照优先级，去除message_reference参数"
                             )
@@ -142,7 +151,7 @@ class BotHttp:
 
         await self.check_session()
         route.is_sandbox = self.is_sandbox
-        _log.debug("[botpy] 请求方式: %s, 请求url: %s", route.method, route.url)
+        _log.debug("[botpy] 请求方式: %s, 请求url: %s", route.method, _safe_url(route.url))
 
         json_body = kwargs.pop("json", None)
         data = kwargs.pop("data", None)
@@ -158,7 +167,7 @@ class BotHttp:
         try:
             return await self._client.request(
                 route.method,
-                route.path.format_map(route.parameters),
+                route.formatted_path,
                 params=params,
                 json_body=json_body,
                 data=data,

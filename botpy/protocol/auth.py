@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -38,6 +39,14 @@ class TokenManager:
         self.app_id = app_id.strip()
         self.secret = secret
         self.base_url = base_url.rstrip("/")
+        parsed_base_url = urlsplit(self.base_url)
+        if (
+            parsed_base_url.scheme.lower() not in {"http", "https"}
+            or not parsed_base_url.netloc
+            or parsed_base_url.username is not None
+            or parsed_base_url.password is not None
+        ):
+            raise ValueError("base_url must be an http(s) URL without userinfo")
         self.timeout = timeout
         self.refresh_margin = max(0, refresh_margin)
         self.max_retries = max(0, max_retries)
@@ -49,6 +58,10 @@ class TokenManager:
         self._expires_at = 0.0
         self._refresh_at = 0.0
         self._logger = logger or _log
+        if not isinstance(user_agent, str) or any(
+            ord(character) < 32 or ord(character) == 127 for character in user_agent
+        ):
+            raise ValueError("user_agent must not contain control characters")
         self.user_agent = user_agent
         self.ssl = ssl
         self._background_task: Optional[asyncio.Task] = None

@@ -20,6 +20,30 @@ from .types.session import Session
 _log = logging.get_logger()
 
 
+def _summarize_gateway_message(message: Any) -> str:
+    """Create a bounded, credential-safe representation for debug logs."""
+
+    if isinstance(message, bytes):
+        message = message.decode("utf-8", errors="replace")
+    if not isinstance(message, str):
+        return f"<{type(message).__name__}>"
+    try:
+        payload = json.loads(message)
+    except (TypeError, ValueError):
+        return f"<{len(message)} chars>"
+    if not isinstance(payload, dict):
+        return f"<{type(payload).__name__}>"
+    data = payload.get("d")
+    if isinstance(data, dict):
+        data = dict(data)
+        if "token" in data:
+            data["token"] = "<redacted>"
+        payload = dict(payload)
+        payload["d"] = data
+    summary = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return summary[:512] + ("..." if len(summary) > 512 else "")
+
+
 class BotWebSocket:
     """Bot的Websocket实现
 
@@ -171,7 +195,19 @@ class BotWebSocket:
             await self._close_ws(self._conn, 1000, "client closing")
 
     async def on_message(self, ws, message):
-        _log.debug("[botpy] 接收消息: %s" % message)
+        try:
+            incoming = json.loads(message)
+        except (TypeError, ValueError):
+            incoming = None
+        if isinstance(incoming, dict):
+            _log.debug(
+                "[botpy] 接收 Gateway 消息 op=%s t=%s s=%s",
+                incoming.get("op"),
+                incoming.get("t"),
+                incoming.get("s"),
+            )
+        else:
+            _log.debug("[botpy] 接收 Gateway 消息: %s", _summarize_gateway_message(message))
         msg = json.loads(message)
         if not isinstance(msg, dict):
             raise ValueError("gateway payload must be an object")
@@ -407,7 +443,7 @@ class BotWebSocket:
         :param event_json:
         """
         send_msg = event_json
-        _log.debug("[botpy] 发送消息: %s" % send_msg)
+        _log.debug("[botpy] 发送 Gateway 消息: %s", _summarize_gateway_message(send_msg))
         if self._conn is None:
             return
         if self._ws_is_closed(self._conn):

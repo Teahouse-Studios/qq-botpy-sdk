@@ -287,7 +287,7 @@ def _parse_prepare_response(
         url = raw_part.get("presigned_url")
         if index is None or index < 0:
             raise ValueError("upload_prepare response contains an invalid part index")
-        if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        if not isinstance(url, str) or not url.startswith("https://"):
             raise ValueError("upload_prepare response contains an invalid presigned_url")
         raw_indexes.append(index)
         raw_urls.append(url)

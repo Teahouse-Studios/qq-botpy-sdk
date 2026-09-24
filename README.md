@@ -216,6 +216,8 @@ client = MyClient(
 ```
 
 生产环境建议在 SDK 前使用反向代理终止 TLS，并将平台回调地址配置为公网 HTTPS URL。
+Webhook 事件默认只接受时间戳误差不超过 300 秒的签名，并在进程内拒绝相同签名的重复投递；
+如需兼容自定义时钟或测试环境，可直接构造 `WebhookTransport` 并设置 `signature_max_age`。
 
 ### 中间件
 

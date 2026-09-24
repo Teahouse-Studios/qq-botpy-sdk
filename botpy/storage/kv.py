@@ -105,6 +105,15 @@ class JsonFileKVStore:
         clock: Callable[[], float] = time.time,
         logger: Optional[logging.Logger] = None,
     ) -> None:
+        if (
+            not isinstance(file_name, str)
+            or not file_name
+            or file_name in {".", ".."}
+            or "/" in file_name
+            or "\\" in file_name
+            or Path(file_name).name != file_name
+        ):
+            raise ValueError("file_name must be a relative file name without path separators")
         self.path = Path(directory) / file_name
         self.save_throttle = max(0.0, save_throttle)
         self._clock = clock
@@ -231,9 +240,13 @@ class JsonFileKVStore:
         self._dirty = False
 
     def _load_sync(self) -> Dict[str, _Entry]:
+        if self.path.is_symlink():
+            self.path.unlink(missing_ok=True)
+            return {}
         if not self.path.exists():
             return {}
         try:
+            self._restrict_file(self.path)
             payload = json.loads(self.path.read_text(encoding="utf-8"))
             raw_entries = payload.get("entries", payload)
             if not isinstance(raw_entries, dict):
@@ -255,14 +268,34 @@ class JsonFileKVStore:
             return {}
 
     def _save_sync(self, entries: Dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(self.path.parent, 0o700)
+        except (OSError, NotImplementedError):
+            pass
         temporary = self.path.with_suffix(self.path.suffix + f".{os.getpid()}-{id(self)}.tmp")
         payload = {"version": 1, "entries": entries}
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(temporary, self.path)
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            os.replace(temporary, self.path)
+        except BaseException:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _restrict_file(path: Path) -> None:
+        try:
+            os.chmod(path, 0o600, follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            pass
 
     def _expired(self, entry: _Entry) -> bool:
         return entry.expire_at is not None and entry.expire_at <= self._clock()

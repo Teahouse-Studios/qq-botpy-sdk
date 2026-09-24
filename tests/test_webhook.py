@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import unittest
 
 import httpx
@@ -20,6 +21,10 @@ from botpy.protocol.transport import (
 
 TEST_SECRET = "DG5g3B4j9X2KOErG"
 TEST_APP_ID = "11111111"
+
+
+def current_timestamp():
+    return str(int(time.time()))
 
 
 class FakeWebhookServer:
@@ -49,7 +54,7 @@ class FakeWebhookServer:
 
 def make_signed_request(payload, secret=TEST_SECRET):
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    timestamp = "1725442341"
+    timestamp = current_timestamp()
     signature = ed25519_sign(secret, timestamp.encode("utf-8") + body)
     return WebhookRequest(
         body=body,
@@ -63,7 +68,7 @@ def make_signed_request(payload, secret=TEST_SECRET):
 class WebhookSignatureTests(unittest.TestCase):
     def test_sign_and_verify_roundtrip(self):
         body = b'{"op":0,"d":{}}'
-        timestamp = "1725442341"
+        timestamp = current_timestamp()
         signature = ed25519_sign(TEST_SECRET, timestamp.encode("utf-8") + body)
 
         self.assertEqual(128, len(signature))
@@ -78,7 +83,7 @@ class WebhookSignatureTests(unittest.TestCase):
 
     def test_rejects_tampered_body_wrong_secret_and_invalid_hex(self):
         body = b'{"op":0}'
-        timestamp = "1725442341"
+        timestamp = current_timestamp()
         signature = ed25519_sign(TEST_SECRET, timestamp.encode("utf-8") + body)
 
         self.assertFalse(
@@ -204,7 +209,7 @@ class WebhookTransportTests(unittest.IsolatedAsyncioTestCase):
             url = f"http://127.0.0.1:{started_info['port']}/callback"
             payload = {
                 "op": 13,
-                "d": {"plain_token": "plain-token", "event_ts": "1725442341"},
+                "d": {"plain_token": "plain-token", "event_ts": current_timestamp()},
             }
             async with httpx.AsyncClient() as session:
                 response = await session.post(url, json=payload)
@@ -222,7 +227,7 @@ class WebhookTransportTests(unittest.IsolatedAsyncioTestCase):
                 body=json.dumps(
                     {
                         "op": 13,
-                        "d": {"plain_token": "plain-token", "event_ts": "1725442341"},
+                        "d": {"plain_token": "plain-token", "event_ts": current_timestamp()},
                     }
                 ).encode("utf-8")
             )

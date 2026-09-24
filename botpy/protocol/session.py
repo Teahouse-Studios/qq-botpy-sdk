@@ -82,10 +82,12 @@ class JsonFileSessionStore:
         self._flush_tasks: Dict[SessionKey, asyncio.Task] = {}
 
     async def load(self, app_id: str, shard_id: int) -> Optional[SessionState]:
+        self._validate_identity(app_id, shard_id)
         async with self._lock:
             return await asyncio.to_thread(self._load_sync, app_id, shard_id)
 
     async def save(self, app_id: str, state: SessionState) -> None:
+        self._validate_identity(app_id, state.shard_id)
         if not state.session_id or state.sequence is None:
             return
 
@@ -104,6 +106,7 @@ class JsonFileSessionStore:
                 self._flush_tasks[key] = asyncio.create_task(self._flush_after(key, delay))
 
     async def clear(self, app_id: str, shard_id: int) -> None:
+        self._validate_identity(app_id, shard_id)
         key = (app_id, shard_id)
         task = None
         async with self._lock:
@@ -147,9 +150,13 @@ class JsonFileSessionStore:
 
     def _load_sync(self, app_id: str, shard_id: int) -> Optional[SessionState]:
         path = self._path_for(app_id, shard_id)
+        if path.is_symlink():
+            self._remove_path(path)
+            return None
         if not path.exists():
             return None
         try:
+            self._restrict_file(path)
             payload = json.loads(path.read_text(encoding="utf-8"))
             saved_at = float(payload["saved_at"])
             if self._clock() - saved_at > self.ttl:
@@ -193,12 +200,22 @@ class JsonFileSessionStore:
             "shard_count": state.shard_count,
             "saved_at": self._clock(),
         }
-        self.directory.mkdir(parents=True, exist_ok=True)
-        temporary_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(temporary_path, path)
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(self.directory, 0o700)
+        except (OSError, NotImplementedError):
+            pass
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(temporary_path, flags, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            os.replace(temporary_path, path)
+        except BaseException:
+            self._remove_path(temporary_path)
+            raise
 
     def _remove_sync(self, app_id: str, shard_id: int) -> None:
         self._remove_path(self._path_for(app_id, shard_id))
@@ -207,12 +224,31 @@ class JsonFileSessionStore:
     def _remove_path(path: Path) -> None:
         try:
             path.unlink(missing_ok=True)
-        except OSError:
+        except (OSError, NotImplementedError):
             pass
 
     def _path_for(self, app_id: str, shard_id: int) -> Path:
+        self._validate_identity(app_id, shard_id)
         encoded_app_id = base64.urlsafe_b64encode(app_id.encode("utf-8")).decode("ascii").rstrip("=")
         return self.directory / f"session-{encoded_app_id}-{shard_id}.json"
+
+    @staticmethod
+    def _validate_identity(app_id: str, shard_id: int) -> None:
+        if not isinstance(app_id, str) or not app_id:
+            raise ValueError("app_id must be a non-empty string")
+        if isinstance(shard_id, bool) or not isinstance(shard_id, int) or shard_id < 0:
+            raise ValueError("shard_id must be a non-negative integer")
+
+    @staticmethod
+    def _restrict_file(path: Path) -> None:
+        """Keep persisted Gateway resume credentials private on POSIX hosts."""
+
+        try:
+            os.chmod(path, 0o600, follow_symlinks=False)
+        except OSError:
+            # chmod is unavailable or restricted on some filesystems/Windows;
+            # the atomic replace still prevents partial writes.
+            pass
 
 
 FileSessionStore = JsonFileSessionStore

@@ -1198,7 +1198,7 @@ class Client:
             "intent": self.intents,
             "token": token,
             "url": self._ws_ap["url"],
-            "ssl": self._ssl,
+            "ssl": getattr(self, "_ssl", None),
             "shards": {"shard_id": shard_id, "shard_count": shard_count},
             "session_store": self._session_store,
         }

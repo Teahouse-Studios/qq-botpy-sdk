@@ -48,10 +48,6 @@ _ext_handlers: List[dict] = []
 
 _LOG_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
 
-# 解决Windows系统cmd运行日志输出不会显示颜色问题
-os.system("")
-
-
 class LoguruHandler(logging.Handler):
     """将标准库日志记录转发给 Loguru，且不强制依赖 ``loguru`` 包。"""
 

@@ -3,6 +3,9 @@ from dataclasses import dataclass, field
 import inspect
 import json
 import logging
+import math
+import re
+import time
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Protocol, Union, runtime_checkable
 
 from ..events import parse_gateway_event
@@ -155,6 +158,10 @@ class WebhookTransport:
         logger: Optional[logging.Logger] = None,
         on_started: Optional[StartedHandler] = None,
         on_error: Optional[ErrorHandler] = None,
+        signature_max_age: Optional[float] = 300.0,
+        max_body_size: int = 1024 * 1024,
+        clock: Callable[[], float] = time.time,
+        replay_cache_size: int = 4096,
     ) -> None:
         if not app_id:
             raise ValueError("app_id is required")
@@ -162,6 +169,18 @@ class WebhookTransport:
             raise ValueError("app_secret is required")
         if not path.startswith("/"):
             raise ValueError("webhook path must start with '/'")
+        if signature_max_age is not None:
+            if (
+                isinstance(signature_max_age, bool)
+                or not isinstance(signature_max_age, (int, float))
+                or not math.isfinite(float(signature_max_age))
+                or signature_max_age <= 0
+            ):
+                raise ValueError("signature_max_age must be a positive finite number or None")
+        if isinstance(max_body_size, bool) or not isinstance(max_body_size, int) or max_body_size < 1:
+            raise ValueError("max_body_size must be a positive integer")
+        if isinstance(replay_cache_size, bool) or not isinstance(replay_cache_size, int) or replay_cache_size < 1:
+            raise ValueError("replay_cache_size must be a positive integer")
 
         self.app_id = app_id
         self.app_secret = app_secret
@@ -177,6 +196,12 @@ class WebhookTransport:
         self._dispatch_tasks: set[asyncio.Task] = set()
         self._server_started = False
         self._running = False
+        self._signature_max_age = float(signature_max_age) if signature_max_age is not None else None
+        self._max_body_size = max_body_size
+        self._clock = clock
+        self._replay_cache_size = replay_cache_size
+        self._seen_signatures: dict[str, float] = {}
+        self._signature_lock = asyncio.Lock()
 
     async def start(self, handler: EventHandler) -> None:
         if self._running:
@@ -231,6 +256,8 @@ class WebhookTransport:
             raise server_error
 
     async def handle_request(self, request: WebhookRequest) -> WebhookResponse:
+        if len(request.body) > self._max_body_size:
+            return self._json_response(413, {"error": "request too large"})
         try:
             payload = json.loads(request.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -252,6 +279,8 @@ class WebhookTransport:
             bot_secret=self.app_secret,
         ):
             return self._json_response(401, {"error": "invalid signature"})
+        if not await self._accept_signature(timestamp, signature):
+            return self._json_response(401, {"error": "invalid signature"})
 
         if payload["op"] == OP_DISPATCH:
             task = asyncio.create_task(self._dispatch(payload))
@@ -260,13 +289,52 @@ class WebhookTransport:
 
         return self._json_response(200, {"op": OP_HTTP_CALLBACK_ACK, "d": 0})
 
+    async def _accept_signature(self, timestamp: str, signature: str) -> bool:
+        """Validate freshness and reject an exact replay of a signed request."""
+
+        try:
+            timestamp_value = float(timestamp)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(timestamp_value):
+            return False
+        now = self._clock()
+        if self._signature_max_age is not None and abs(now - timestamp_value) > self._signature_max_age:
+            return False
+
+        async with self._signature_lock:
+            if self._signature_max_age is not None:
+                cutoff = now - self._signature_max_age
+                self._seen_signatures = {
+                    key: seen_at for key, seen_at in self._seen_signatures.items() if seen_at >= cutoff
+                }
+            if signature in self._seen_signatures:
+                return False
+            self._seen_signatures[signature] = now
+            if len(self._seen_signatures) > self._replay_cache_size:
+                oldest = sorted(self._seen_signatures, key=self._seen_signatures.get)
+                for key in oldest[: len(self._seen_signatures) - self._replay_cache_size]:
+                    self._seen_signatures.pop(key, None)
+        return True
+
     def _handle_validation(self, payload: Mapping[str, Any]) -> WebhookResponse:
         data = payload.get("d")
         if not isinstance(data, Mapping):
             return self._json_response(400, {"error": "invalid validation"})
         plain_token = data.get("plain_token")
         event_ts = data.get("event_ts")
-        if not isinstance(plain_token, str) or not plain_token or not isinstance(event_ts, str) or not event_ts:
+        # Keep the unsigned URL-validation challenge bounded to the platform's
+        # token/timestamp shape before deriving the response signature.
+        if (
+            not isinstance(plain_token, str)
+            or re.fullmatch(r"[A-Za-z0-9_+./=-]{1,256}", plain_token) is None
+            or not isinstance(event_ts, str)
+            or re.fullmatch(r"[0-9]{1,16}", event_ts) is None
+            or (
+                self._signature_max_age is not None
+                and abs(self._clock() - int(event_ts)) > self._signature_max_age
+            )
+        ):
             return self._json_response(400, {"error": "invalid validation"})
         response = sign_validation_response(
             plain_token=plain_token,
