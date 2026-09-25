@@ -9,8 +9,8 @@ client = botpy.Client(
     panels=panels,
     config_sync_strict=False,
     markdown_support=False,
-    base_url="https://api.sgroup.qq.com",
-    token_base_url="https://bots.qq.com",
+    base_url="https://api.bot.qq.com",
+    token_base_url="https://api.bot.qq.com",
     user_agent="my-bot/1.0",
     ssl=ssl_context,
     upload_cache=UploadCache(),
@@ -20,6 +20,9 @@ client = botpy.Client(
     gateway_send_timeout=30.0,
 )
 ```
+
+`base_url` 是 REST API 的调用根地址，默认使用 `https://api.bot.qq.com`，也可以配置为内部网关或测试环境的
+HTTPS 地址。`token_base_url` 控制获取 access token 的地址，默认与 REST API 使用同一域名。
 
 `ssl` 会传给 httpx，可使用 `ssl.SSLContext` 或布尔值。生产环境不要使用 `False`；自定义 CA 应使用
 `ssl.create_default_context(cafile=...)`。httpx 不支持旧版客户端特有的 Fingerprint 对象。

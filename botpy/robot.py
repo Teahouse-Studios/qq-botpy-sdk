@@ -1,6 +1,7 @@
 from .logging import get_logger
 from botpy.types import robot
 from .protocol.auth import TokenManager
+from .protocol.constants import DEFAULT_API_BASE_URL
 
 _log = get_logger()
 
@@ -24,7 +25,7 @@ class Token:
         app_id: str,
         secret: str,
         *,
-        base_url: str = "https://bots.qq.com",
+        base_url: str = DEFAULT_API_BASE_URL,
         timeout: float = 20,
         user_agent: str = "qq-botpy",
         ssl=None,

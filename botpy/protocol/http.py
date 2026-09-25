@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Protocol
 import httpx
 
 from .errors import ApiError, TransportError
+from .constants import DEFAULT_API_BASE_URL
 
 
 TRACE_ID_HEADER = "X-Tps-trace-Id"
@@ -132,7 +133,7 @@ class ApiClient:
         self,
         token_provider: AccessTokenProvider,
         *,
-        base_url: str = "https://api.sgroup.qq.com",
+        base_url: str = DEFAULT_API_BASE_URL,
         timeout: float = 5,
         max_retries: int = 2,
         retry_base_delay: float = 0.5,

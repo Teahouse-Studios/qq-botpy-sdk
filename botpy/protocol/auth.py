@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .constants import DEFAULT_API_BASE_URL
 from .errors import ApiError, AuthenticationError, TransportError
 
 
@@ -22,7 +23,7 @@ class TokenManager:
         app_id: str,
         secret: str,
         *,
-        base_url: str = "https://bots.qq.com",
+        base_url: str = DEFAULT_API_BASE_URL,
         timeout: float = 20,
         refresh_margin: float = 60,
         max_retries: int = 2,

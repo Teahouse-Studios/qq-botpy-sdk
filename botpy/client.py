@@ -20,6 +20,7 @@ from .gateway import BotWebSocket
 from .http import BotHttp
 from .middleware import Middleware, MiddlewareContext, create_middleware_context, run_middleware_chain
 from .protocol.events import normalize_inbound_message
+from .protocol.constants import DEFAULT_API_BASE_URL
 from .protocol.errors import TransportError
 from .protocol.media import ChunkedMediaUploader, ProgressCallback
 from .protocol.message import (
@@ -99,7 +100,7 @@ class Client:
         middlewares: Optional[Iterable[Middleware]] = None,
         markdown_support: bool = False,
         base_url: Optional[str] = None,
-        token_base_url: str = "https://bots.qq.com",
+        token_base_url: str = DEFAULT_API_BASE_URL,
         user_agent: str = "qq-botpy",
         ssl: Any = None,
         upload_cache: Optional[UploadCache] = None,
@@ -115,7 +116,7 @@ class Client:
         Args:
           intents (Intents): 通道：机器人需要注册的通道事件code，通过Intents提供的方法获取。
           timeout (int): 机器人 HTTP 请求的超时时间。. Defaults to 5
-          is_sandbox: 是否使用沙盒环境。. Defaults to False
+          is_sandbox: 兼容旧配置；当前 API 域名统一为 ``api.bot.qq.com``。Defaults to False
 
           log_config: 日志配置，可以为dict或.json/.yaml文件路径，会从文件中读取(logging.config.dictConfig)。Default to None（不做更改）
           log_format: 控制台输出格式(logging.basicConfig(format=))。Default to None（不做更改）

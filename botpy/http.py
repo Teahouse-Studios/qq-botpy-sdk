@@ -6,6 +6,7 @@ from urllib.parse import quote
 from . import logging
 from .errors import HttpErrorDict, ServerError
 from .protocol.errors import ApiError
+from .protocol.constants import DEFAULT_API_BASE_URL, DEFAULT_SANDBOX_API_BASE_URL
 from .protocol.http import ApiClient, _safe_url
 from .robot import Token
 from .types import robot
@@ -14,8 +15,9 @@ _log = logging.get_logger()
 
 
 class Route:
-    DOMAIN: ClassVar[str] = "api.sgroup.qq.com"
-    SANDBOX_DOMAIN: ClassVar[str] = "sandbox.api.sgroup.qq.com"
+    DOMAIN: ClassVar[str] = "api.bot.qq.com"
+    # Compatibility name retained for callers that inspect this constant.
+    SANDBOX_DOMAIN: ClassVar[str] = DOMAIN
     SCHEME: ClassVar[str] = "https"
 
     def __init__(self, method: str, path: str, is_sandbox: str = False, **parameters: Any) -> None:
@@ -29,6 +31,12 @@ class Route:
         self.path: str = path
         self.is_sandbox = is_sandbox
         self.parameters = parameters
+        self._base_url: Optional[str] = None
+
+    def bind_base_url(self, base_url: str) -> None:
+        """Bind the configured API root used for diagnostics and ``url``."""
+
+        self._base_url = base_url.rstrip("/")
 
     @property
     def formatted_path(self) -> str:
@@ -39,11 +47,13 @@ class Route:
 
     @property
     def url(self):
-        if self.is_sandbox:
-            d = self.SANDBOX_DOMAIN
+        if self._base_url is not None:
+            base_url = self._base_url
+        elif self.is_sandbox:
+            base_url = DEFAULT_SANDBOX_API_BASE_URL
         else:
-            d = self.DOMAIN
-        return "{}://{}{}".format(self.SCHEME, d, self.formatted_path)
+            base_url = DEFAULT_API_BASE_URL
+        return f"{base_url}{self.formatted_path}"
 
 
 class BotHttp:
@@ -59,7 +69,7 @@ class BotHttp:
         app_id: str = None,
         secret: str = None,
         base_url: Optional[str] = None,
-        token_base_url: str = "https://bots.qq.com",
+        token_base_url: str = DEFAULT_API_BASE_URL,
         user_agent: str = "qq-botpy",
         ssl: Any = None,
     ):
@@ -151,6 +161,7 @@ class BotHttp:
 
         await self.check_session()
         route.is_sandbox = self.is_sandbox
+        route.bind_base_url(self.base_url)
         _log.debug("[botpy] 请求方式: %s, 请求url: %s", route.method, _safe_url(route.url))
 
         json_body = kwargs.pop("json", None)

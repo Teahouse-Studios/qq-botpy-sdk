@@ -225,7 +225,7 @@ class BotApiStreamRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("stream", result["id"])
         self.assertEqual("/v2/users/{openid}/stream_messages", http.route.path)
-        self.assertEqual("https://api.sgroup.qq.com/v2/users/user/stream_messages", http.route.url)
+        self.assertEqual("https://api.bot.qq.com/v2/users/user/stream_messages", http.route.url)
         self.assertNotIn("stream_msg_id", http.payload)
         self.assertEqual(8, http.payload["msg_seq"])
 

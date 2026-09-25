@@ -59,6 +59,10 @@
 - 可配置 API 地址、Token 地址、User-Agent 和 SSLContext/私有 CA。
 - 通过 `client.api.request/get/post/put/patch/delete()` 调用尚未封装的 REST API。
 
+REST API 默认调用 `https://api.bot.qq.com`；沙盒兼容参数不会切换到其他域名。可通过
+`Client(base_url="https://your-api.example.com")` 配置自定义调用域名；如果 token 服务使用独立网关，
+可同时配置 `token_base_url`。
+
 ### 消息、媒体与 Interaction
 
 - 统一的 `RawEvent`、`InboundMessage`、`ReplyTarget` 和 `InteractionContext`。

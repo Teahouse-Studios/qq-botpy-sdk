@@ -454,7 +454,7 @@ class BotApiMessageRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("DELETE", http.route.method)
         self.assertEqual("/v2/users/{openid}/messages/{message_id}", http.route.path)
-        self.assertEqual("https://api.sgroup.qq.com/v2/users/user/messages/message", http.route.url)
+        self.assertEqual("https://api.bot.qq.com/v2/users/user/messages/message", http.route.url)
 
     async def test_file_upload_includes_file_name_and_omits_none(self):
         class Http:

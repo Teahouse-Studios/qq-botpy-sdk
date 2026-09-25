@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 
-from botpy.http import Route
+from botpy.http import BotHttp, Route
 from botpy.gateway import _summarize_gateway_message
 from botpy.protocol.http import ApiClient
 from botpy.protocol.auth import TokenManager
@@ -20,6 +20,42 @@ class _TokenProvider:
 
     async def get_access_token(self, force_refresh=False):
         return "token"
+
+
+class _Response:
+    status_code = 200
+    headers = {}
+    text = "{}"
+
+
+class _RequestContext:
+    async def resolve(self):
+        return _Response()
+
+    def __await__(self):
+        return self.resolve().__await__()
+
+
+class _RecordingSession:
+    is_closed = False
+
+    def __init__(self):
+        self.urls = []
+
+    def request(self, method, url, **kwargs):
+        self.urls.append(url)
+        return _RequestContext()
+
+    async def close(self):
+        return None
+
+
+class _LegacyToken(_TokenProvider):
+    async def check_token(self):
+        return None
+
+    def get_string(self):
+        return "QQBot token"
 
 
 class SecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -39,6 +75,28 @@ class SecurityRegressionTests(unittest.IsolatedAsyncioTestCase):
     def test_route_parameters_are_path_encoded(self):
         route = Route("GET", "/users/{openid}", openid="user/with spaces")
         self.assertEqual("/users/user%2Fwith%20spaces", route.formatted_path)
+        route.bind_base_url("https://internal-api.example.test/root")
+        self.assertEqual(
+            "https://internal-api.example.test/root/users/user%2Fwith%20spaces",
+            route.url,
+        )
+
+    def test_sandbox_compatibility_does_not_change_api_origin(self):
+        self.assertEqual(
+            "https://api.bot.qq.com",
+            Route("GET", "/health", is_sandbox=True).url.split("/health")[0],
+        )
+
+    async def test_custom_base_url_is_used_for_real_http_requests(self):
+        session = _RecordingSession()
+        token = _LegacyToken()
+        client = BotHttp(timeout=5, base_url="https://internal-api.example.test/root")
+        client._token = token
+        client._client = ApiClient(token, base_url="https://internal-api.example.test/root", session=session)
+
+        await client.request(Route("GET", "/health"))
+
+        self.assertEqual(["https://internal-api.example.test/root/health"], session.urls)
 
     def test_gateway_debug_summary_redacts_tokens(self):
         summary = _summarize_gateway_message(json.dumps({"op": 2, "d": {"token": "secret-token"}}))

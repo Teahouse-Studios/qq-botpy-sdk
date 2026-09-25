@@ -190,7 +190,7 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"ok": True}, result)
         method, url, kwargs = session.calls[0]
         self.assertEqual("GET", method)
-        self.assertEqual("https://api.sgroup.qq.com/test", url)
+        self.assertEqual("https://api.bot.qq.com/test", url)
         self.assertEqual("QQBot access-token", kwargs["headers"]["Authorization"])
         self.assertEqual("app-id", kwargs["headers"]["X-Union-Appid"])
 

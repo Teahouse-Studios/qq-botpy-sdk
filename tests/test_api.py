@@ -172,7 +172,7 @@ class APITestCase(unittest.TestCase):
 
     def test_ws(self):
         ws = self.loop.run_until_complete(self.api.get_ws_url())
-        self.assertEqual(ws["url"], "wss://api.sgroup.qq.com/websocket")
+        self.assertEqual(ws["url"], "wss://api.bot.qq.com/websocket")
 
     def test_mute_all(self):
         result = self.loop.run_until_complete(self.api.mute_all(GUILD_ID, mute_seconds="20"))
