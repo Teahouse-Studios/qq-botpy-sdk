@@ -18,6 +18,7 @@ client = botpy.Client(
     on_message_sent=lambda ref_idx, meta: save_ref(ref_idx, meta),
     loguru_logger=logger,
     gateway_send_timeout=30.0,
+    proxy="http://127.0.0.1:3128",
 )
 ```
 
@@ -26,6 +27,13 @@ HTTPS 地址。`token_base_url` 控制获取 access token 的地址，默认与 
 
 `ssl` 会传给 httpx，可使用 `ssl.SSLContext` 或布尔值。生产环境不要使用 `False`；自定义 CA 应使用
 `ssl.create_default_context(cafile=...)`。httpx 不支持旧版客户端特有的 Fingerprint 对象。
+
+`proxy` 同样会传给 httpx，并统一作用于 REST API、access token 与 Gateway WebSocket。取值可以是
+`http`/`https`/`socks5`/`socks5h` URL 字符串，或 `httpx.Proxy`/`httpx.URL` 实例；`None` 与空字符串表示
+不使用代理。代理 URL 中可以直接携带 `user:password`，日志只会输出 `user:***@host:port`。非法协议、
+缺少主机名、端口越界或包含控制字符的配置会在构造 `Client` 时抛出 `ValueError`；使用 `socks5` 需要安装
+`httpx[socks]`。httpx 默认还会读取 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`，显式 `proxy` 优先，且不支持
+`NO_PROXY`。
 
 首次登录会同步获取 token，随后启动后台提前刷新循环；`Client.close()` 会停止该任务。
 

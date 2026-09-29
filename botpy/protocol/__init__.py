@@ -38,6 +38,7 @@ from .message import (
     MessageType,
 )
 from .models import InboundAttachment, InboundMessage, InteractionContext, RawEvent, ReplyTarget, SessionState
+from .proxy import ProxyConfig, describe_proxy, normalize_proxy
 from .media_utils import (
     DataUrl,
     clean_extension,
@@ -105,6 +106,7 @@ __all__ = (
     "MediaUrlResult",
     "MessageType",
     "ProgressCallback",
+    "ProxyConfig",
     "ParsedTarget",
     "RateLimitError",
     "RawEvent",
@@ -132,6 +134,7 @@ __all__ = (
     "compute_file_hash",
     "detect_ffmpeg",
     "detect_media_kind",
+    "describe_proxy",
     "extract_qqbot_image_size",
     "ffmpeg_to_pcm",
     "format_duration",
@@ -155,6 +158,7 @@ __all__ = (
     "should_transcode_voice",
     "strip_amr_header",
     "normalize_inbound_message",
+    "normalize_proxy",
     "parse_gateway_event",
     "sign_validation_response",
     "verify_webhook_signature",

@@ -1,7 +1,10 @@
+from typing import Optional
+
 from .logging import get_logger
 from botpy.types import robot
 from .protocol.auth import TokenManager
 from .protocol.constants import DEFAULT_API_BASE_URL
+from .protocol.proxy import ProxyConfig
 
 _log = get_logger()
 
@@ -29,12 +32,15 @@ class Token:
         timeout: float = 20,
         user_agent: str = "qq-botpy",
         ssl=None,
+        proxy: Optional[ProxyConfig] = None,
     ):
         """
         :param app_id:
             机器人appid
         :param secret:
             机器人密钥
+        :param proxy:
+            可选的 HTTP 代理，例如 ``http://127.0.0.1:3128``。
         """
         self.app_id = app_id
         self.secret = secret
@@ -46,8 +52,13 @@ class Token:
             timeout=timeout,
             user_agent=user_agent,
             ssl=ssl,
+            proxy=proxy,
             logger=_log,
         )
+
+    @property
+    def proxy(self):
+        return self._manager.proxy
 
     @property
     def access_token(self):

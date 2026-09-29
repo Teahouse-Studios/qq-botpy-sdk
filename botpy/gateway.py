@@ -10,6 +10,7 @@ from httpx_ws import WebSocketDisconnect, aconnect_ws
 from . import logging
 from .connection import ConnectionSession
 from .protocol.events import parse_gateway_event
+from .protocol.proxy import describe_proxy
 from .protocol.reconnect import CloseAction, ReconnectPolicy
 from .protocol.models import SessionState
 from .protocol.session import SessionStore
@@ -334,15 +335,20 @@ class BotWebSocket:
         ws_url = self._session["url"]
         if not ws_url:
             raise Exception("[botpy] 会话url为空")
+        proxy = self._session.get("proxy")
+        if proxy is not None:
+            _log.debug("[botpy] Gateway 连接通过代理建立: %s", describe_proxy(proxy))
 
         # httpx does not provide a WebSocket client itself; httpx-ws bridges
         # an ``httpx.AsyncClient`` to a standards-compliant WebSocket stream.
         # Keep a short-lived HTTP client per Gateway connection and bound
-        # concurrent connection attempts.
+        # concurrent connection attempts.  The configured HTTP proxy (if any)
+        # is handed to httpx so the WebSocket handshake and frames share it.
         async with httpx.AsyncClient(
             limits=httpx.Limits(max_connections=10),
             timeout=None,
             verify=self._session.get("ssl") if self._session.get("ssl") is not None else True,
+            proxy=self._session.get("proxy"),
         ) as session:
             async with aconnect_ws(self._session["url"], session) as ws_conn:
                 self._conn = ws_conn

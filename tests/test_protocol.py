@@ -178,6 +178,14 @@ class TokenManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], session.calls)
 
+    async def test_close_releases_owned_httpx_session(self):
+        manager = TokenManager("app", "secret")
+        session = await manager._get_session()
+
+        await manager.close()
+
+        self.assertTrue(session.is_closed)
+
 
 class ApiClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_adds_auth_headers_and_parses_json(self):
@@ -298,6 +306,14 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
         client = ApiClient(FakeTokenProvider(), session=FakeSession([FakeResponse(status=204)]))
 
         self.assertIsNone(await client.delete("/resource"))
+
+    async def test_close_releases_owned_httpx_session(self):
+        client = ApiClient(FakeTokenProvider())
+        session = await client._get_session()
+
+        await client.close()
+
+        self.assertTrue(session.is_closed)
 
     async def test_401_refreshes_token_once_and_retries(self):
         provider = FakeTokenProvider(tokens=["expired-token", "fresh-token"])

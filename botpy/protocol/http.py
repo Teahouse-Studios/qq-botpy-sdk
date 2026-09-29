@@ -9,6 +9,7 @@ import httpx
 
 from .errors import ApiError, TransportError
 from .constants import DEFAULT_API_BASE_URL
+from .proxy import ProxyConfig, describe_proxy, normalize_proxy
 
 
 TRACE_ID_HEADER = "X-Tps-trace-Id"
@@ -108,6 +109,17 @@ def _summarize_payload(payload: Any) -> str:
     return summary[:MAX_LOG_SUMMARY_CHARS] + f"...<{len(summary) - MAX_LOG_SUMMARY_CHARS} chars truncated>"
 
 
+async def _close_session(session: Any) -> None:
+    """关闭 httpx session，并兼容只实现了 ``close`` 的旧测试替身。"""
+
+    close = getattr(session, "aclose", None) or getattr(session, "close", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
 def _request_was_not_sent(error: BaseException) -> bool:
     """Return whether a transport error happened before an HTTP request could be sent."""
 
@@ -142,6 +154,7 @@ class ApiClient:
         logger: Optional[logging.Logger] = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         ssl: Any = None,
+        proxy: Optional[ProxyConfig] = None,
     ) -> None:
         self.token_provider = token_provider
         self.base_url = base_url.rstrip("/")
@@ -164,6 +177,9 @@ class ApiClient:
         self._logger = logger or logging.getLogger("botpy.protocol.http")
         self._sleep = sleep
         self.ssl = ssl
+        # An injected ``session`` already carries its own transport settings, so
+        # the proxy only applies to sessions this client creates itself.
+        self.proxy = normalize_proxy(proxy)
         if not isinstance(user_agent, str) or any(
             ord(character) < 32 or ord(character) == 127 for character in user_agent
         ):
@@ -175,7 +191,7 @@ class ApiClient:
             return
         self._closed = True
         if self._owns_session and self._session and not self._session.is_closed:
-            await self._session.close()
+            await _close_session(self._session)
 
     async def get(self, path: str, **kwargs: Any) -> Any:
         return await self.request("GET", path, **kwargs)
@@ -356,7 +372,12 @@ class ApiClient:
         async with self._session_lock:
             self._ensure_open()
             if not self._session or self._session.is_closed:
-                self._session = httpx.AsyncClient(verify=self.ssl if self.ssl is not None else True)
+                if self.proxy is not None:
+                    self._logger.debug("[botpy] HTTP 客户端通过代理发送请求: %s", describe_proxy(self.proxy))
+                self._session = httpx.AsyncClient(
+                    verify=self.ssl if self.ssl is not None else True,
+                    proxy=self.proxy,
+                )
                 self._owns_session = True
         return self._session
 

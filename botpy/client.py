@@ -33,6 +33,7 @@ from .protocol.message import (
     MessageType,
 )
 from .protocol.models import InboundMessage, InteractionContext, RawEvent, ReplyTarget
+from .protocol.proxy import ProxyConfig, normalize_proxy
 from .protocol.reply import ReplyLimiter
 from .protocol.session import SessionStore
 from .protocol.streaming import DEFAULT_STREAM_THROTTLE_MS, StreamSession
@@ -111,6 +112,7 @@ class Client:
         panels: Optional[Iterable[Panel]] = None,
         config_sync_strict: bool = False,
         gateway_send_timeout: Optional[float] = 30.0,
+        proxy: Optional[ProxyConfig] = None,
     ):
         """
         Args:
@@ -139,6 +141,7 @@ class Client:
           panels: 可选的声明式指令面板集合；使用稳定 key 非破坏性同步。
           config_sync_strict: 配置同步失败时是否中止客户端启动。
           gateway_send_timeout: Gateway 重连期间等待消息发送恢复的秒数；``None`` 表示一直等待。
+          proxy: 可选 HTTP 代理，作用于 REST API、access token 和 Gateway WebSocket。
         """
         self.intents: int = intents.value
         self.ret_coro: bool = False
@@ -173,6 +176,7 @@ class Client:
         self._token_base_url = token_base_url
         self._user_agent = user_agent
         self._ssl = ssl
+        self._proxy = normalize_proxy(proxy)
         self.http: BotHttp = BotHttp(
             timeout=timeout,
             is_sandbox=is_sandbox,
@@ -180,6 +184,7 @@ class Client:
             token_base_url=token_base_url,
             user_agent=user_agent,
             ssl=ssl,
+            proxy=self._proxy,
         )
         self.api: BotAPI = BotAPI(http=self.http, message_guard=self._wait_for_gateway_ready)
         self.configuration = ConfigurationManager(
@@ -1016,6 +1021,7 @@ class Client:
             base_url=self._token_base_url,
             user_agent=self._user_agent,
             ssl=self._ssl,
+            proxy=getattr(self, "_proxy", None),
         )
         self._appid = appid
         self.ret_coro = ret_coro
@@ -1200,6 +1206,7 @@ class Client:
             "token": token,
             "url": self._ws_ap["url"],
             "ssl": getattr(self, "_ssl", None),
+            "proxy": getattr(self, "_proxy", None),
             "shards": {"shard_id": shard_id, "shard_count": shard_count},
             "session_store": self._session_store,
         }

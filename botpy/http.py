@@ -8,6 +8,7 @@ from .errors import HttpErrorDict, ServerError
 from .protocol.errors import ApiError
 from .protocol.constants import DEFAULT_API_BASE_URL, DEFAULT_SANDBOX_API_BASE_URL
 from .protocol.http import ApiClient, _safe_url
+from .protocol.proxy import ProxyConfig, describe_proxy, normalize_proxy
 from .robot import Token
 from .types import robot
 
@@ -72,6 +73,7 @@ class BotHttp:
         token_base_url: str = DEFAULT_API_BASE_URL,
         user_agent: str = "qq-botpy",
         ssl: Any = None,
+        proxy: Optional[ProxyConfig] = None,
     ):
         self.timeout = timeout
         self.is_sandbox = is_sandbox
@@ -80,6 +82,7 @@ class BotHttp:
         self.token_base_url = token_base_url.rstrip("/")
         self.user_agent = user_agent
         self.ssl = ssl
+        self.proxy = normalize_proxy(proxy)
 
         self._token: Optional[Token] = (
             None
@@ -90,6 +93,7 @@ class BotHttp:
                 base_url=self.token_base_url,
                 user_agent=self.user_agent,
                 ssl=self.ssl,
+                proxy=self.proxy,
             )
         )
         self._session = None
@@ -121,6 +125,8 @@ class BotHttp:
         }
 
         if self._client is None:
+            if self.proxy is not None:
+                _log.debug("[botpy] REST 请求通过代理发送: %s", describe_proxy(self.proxy))
             self._client = ApiClient(
                 self._token,
                 base_url=self.base_url,
@@ -128,6 +134,7 @@ class BotHttp:
                 max_retries=2,
                 user_agent=self.user_agent,
                 ssl=self.ssl,
+                proxy=self.proxy,
                 logger=_log,
             )
 

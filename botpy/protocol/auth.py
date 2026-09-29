@@ -10,6 +10,8 @@ import httpx
 
 from .constants import DEFAULT_API_BASE_URL
 from .errors import ApiError, AuthenticationError, TransportError
+from .http import _close_session
+from .proxy import ProxyConfig, describe_proxy, normalize_proxy
 
 
 _log = logging.getLogger("botpy.protocol.auth")
@@ -31,6 +33,7 @@ class TokenManager:
         logger: Optional[logging.Logger] = None,
         user_agent: str = "qq-botpy",
         ssl: Any = None,
+        proxy: Optional[ProxyConfig] = None,
     ) -> None:
         if not app_id:
             raise ValueError("app_id is required")
@@ -65,6 +68,9 @@ class TokenManager:
             raise ValueError("user_agent must not contain control characters")
         self.user_agent = user_agent
         self.ssl = ssl
+        # An injected ``session`` already carries its own transport settings, so
+        # the proxy only applies to sessions this manager creates itself.
+        self.proxy = normalize_proxy(proxy)
         self._background_task: Optional[asyncio.Task] = None
         self._closed = False
 
@@ -136,7 +142,7 @@ class TokenManager:
         self._closed = True
         await self.stop_background_refresh()
         if self._owns_session and self._session and not self._session.is_closed:
-            await self._session.close()
+            await _close_session(self._session)
 
     def start_background_refresh(self) -> asyncio.Task:
         """启动单实例 token 提前刷新循环。"""
@@ -174,7 +180,12 @@ class TokenManager:
         async with self._session_lock:
             self._ensure_open()
             if not self._session or self._session.is_closed:
-                self._session = httpx.AsyncClient(verify=self.ssl if self.ssl is not None else True)
+                if self.proxy is not None:
+                    self._logger.debug("[botpy] access token 请求通过代理发送: %s", describe_proxy(self.proxy))
+                self._session = httpx.AsyncClient(
+                    verify=self.ssl if self.ssl is not None else True,
+                    proxy=self.proxy,
+                )
                 self._owns_session = True
         return self._session
 

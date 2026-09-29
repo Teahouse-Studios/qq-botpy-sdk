@@ -32,6 +32,8 @@
 - `TransportError` 保留 `method`、`url`、原始 `cause` 和 `attempts`；`attempts=0` 表示请求未发出，
   重试前等待 Gateway 超时则保留此前的实际请求次数。
 - 登录成功后会启动后台 token 提前刷新循环，长时间没有 HTTP 流量时也能保证后续 Gateway 重连使用新 token。
+- `Client(proxy=...)` 可统一为 REST API、access token 和 Gateway WebSocket 配置 HTTP 代理；
+  非法代理配置会在构造 `Client` 时立即抛出 `ValueError`。
 - 消息和媒体 payload 会过滤值为 `None` 的字段。
 
 ## 消息发送

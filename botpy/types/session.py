@@ -15,5 +15,7 @@ class Session(TypedDict):
     token: Token
     url: str
     shards: ShardConfig
+    ssl: NotRequired[Any]
+    proxy: NotRequired[Any]
     reconnect_policy: NotRequired[Any]
     session_store: NotRequired[Any]
