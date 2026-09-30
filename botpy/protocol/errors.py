@@ -1,6 +1,27 @@
 from typing import Any, Mapping, Optional
 
 
+def extract_error_code(payload: Any) -> Optional[int]:
+    """从响应体中取出平台错误码。
+
+    开放平台在失败响应里返回的是 ``err_code``（文档明确要求「根据 ``err_code``
+    判断请求是否失败」），部分旧接口/网关还会返回 ``code``；两者都接受，
+    ``err_code`` 优先。
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    for key in ("err_code", "code"):
+        raw_code = payload.get(key)
+        if isinstance(raw_code, bool):
+            continue
+        if isinstance(raw_code, int):
+            return raw_code
+        if isinstance(raw_code, str) and raw_code.lstrip("-").isdigit():
+            return int(raw_code)
+    return None
+
+
 class BotPyError(RuntimeError):
     """所有新版 botpy 异常的基类。"""
 
@@ -58,11 +79,7 @@ class ApiError(BotPyError):
             raw_message = payload.get("message") or payload.get("msg")
             if raw_message is not None:
                 message = str(raw_message)
-            raw_code = payload.get("code")
-            if isinstance(raw_code, int):
-                code = raw_code
-            elif isinstance(raw_code, str) and raw_code.lstrip("-").isdigit():
-                code = int(raw_code)
+            code = extract_error_code(payload)
 
         error_type = RateLimitError if status == 429 else cls
         if status in (401, 403):

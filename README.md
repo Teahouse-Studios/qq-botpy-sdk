@@ -54,6 +54,9 @@
 - 401 强制刷新一次 Token 后重试。
 - 结构化 API、认证、限流和传输异常。
 - 解析 `Retry-After`，安全方法支持指数退避。
+- 按平台 `err_code` 处理消息发送失败：回退主动消息、换 `msg_seq` 重发、指数退避重发，
+  见[消息发送失败处理](#消息发送失败处理)。
+- 出站请求整流：按官方文档核对后的接口频率限制排队限速，见[请求整流与限速](#请求整流与限速)。
 - POST/PATCH 默认不自动重试，避免非幂等消息重复发送。
 - C2C/群聊仅带 `msg_id` 的被动回复会对不确定的传输失败重试一次。
 - 可配置 API 地址、Token 地址、User-Agent 和 SSLContext/私有 CA。
@@ -207,6 +210,84 @@ WebSocket 模式下，Gateway 正在连接或重连时，消息会等待所有�
 请求。`gateway_send_timeout` 默认为 30 秒；设为 `None` 可一直等待，设为 `0` 则立即失败。首次请求前
 等待超时时，`TransportError.attempts` 为 `0`；若重试等待超时，则保留此前实际请求次数。
 
+### 请求整流与限速
+
+QQ 开放平台为每个 REST 接口声明了 `接口频率限制`，消息类接口还会叠加「主动消息」的 Bot 维度、
+单关系维度和每日额度限制。SDK 默认启用**队列化令牌桶**：同一通道上的请求先到先发，按配额均匀
+发出，收到 `429` 时按 `Retry-After` 让整个通道一起退避，避免瞬时并发撞限流。
+
+默认限制表来自官方文档逐条核对（详见 [docs/RATE_LIMITS.md](docs/RATE_LIMITS.md)，核对脚本
+`generated_docs/fetch_docs.py` + `generated_docs/extract_rate_limits.py`）：
+
+| 通道 | 说明 | 示例 |
+| --- | --- | --- |
+| `route` | 接口级 `接口频率限制` | `POST /v2/groups/{}/messages` → 100 QPS |
+| `bot` | 主动消息的 Bot 维度配额，全 Bot 共享 | 已认证群聊 60 QPM、单聊 10 QPS |
+| `relationship` | 主动消息的单关系配额，按群/用户/子频道分别计数 | 20 QPM + 1000 条/天 |
+| `proactive` / `relationship`（子频道） | 子频道每 1s 最多 5 条，主动推送每天 20 条 | 5 QPS |
+
+被动回复（带 `msg_id`/`event_id`）只受接口级与「始终生效」配额约束，不会消耗主动消息额度。
+媒体预签名地址等非 `base_url` 主机上的传输不计入接口配额。
+
+```python
+# 默认：启用整流，按文档限制排队
+client = MyClient(intents=intents)
+
+# 主动消息配额默认按「已认证」档位整流（平台没有查询认证等级的接口）：
+#   已认证（默认）：单聊 10 QPS，群聊 60 QPM
+#   未认证：单聊 5 QPS + 30 QPM，群聊 30 QPM
+# 机器人未通过企业/个人认证时必须显式降档，否则会超出平台配额被限流。
+client = MyClient(intents=intents, rate_limit={"certification": "unverified"})
+
+# 追加全局在途请求上限，进一步压制突发
+client = MyClient(intents=intents, rate_limit={"max_concurrency": 8})
+
+# 完全关闭整流（自行保证速率）
+client = MyClient(intents=intents, rate_limit=False)
+
+# 完全自定义：注入自己的 RateLimiter
+from botpy.protocol import RateLimitBudget, RateLimiter, RouteRule
+
+limiter = RateLimiter(
+    route_rules={"POST /v2/groups/{}/messages": RouteRule((RateLimitBudget(20, 60.0),))},
+)
+client = MyClient(intents=intents, rate_limit=limiter)
+```
+
+`RateLimiter` 可调参数：`certification`（`"certified"` 默认 / `"unverified"`）、`max_concurrency`、
+`route_rules`、`default_budgets`（未匹配接口的兜底配额，默认 50 QPS）、`max_buckets`、
+`default_penalty`、`max_pacing_window`。
+
+窗口长于 `max_pacing_window`（默认 3600 秒）的配额属于「每日额度」：用尽时 SDK 记录一条 warning
+并仍然发送，由平台返回结构化错误，而不会让消息挂起数小时。可用 `limiter.snapshot()` 查看各通道
+的排队深度与剩余令牌。
+
+### 消息发送失败处理
+
+平台把消息发送的业务错误放在响应体的 `err_code` 里，`Client.send()` 会据此决定下一步动作
+（完整错误码表见 [docs/SEND_ERRORS.md](docs/SEND_ERRORS.md)）：
+
+| 情况 | 处理 |
+| --- | --- |
+| `msg_id`/`event_id` 失效（`40034005`、`40034128`、`304103` 等） | 去掉被动回复上下文，回退为主动消息重发一次 |
+| 消息被去重（`40054005`） | 首次发送换一个新 `msg_seq` 重发一次；仍失败直接抛错 |
+| 网络超时 / 连接中断 | 按 `3 × 2ⁿ` 秒（3、6、12、24……）指数退避重发 |
+| 已知不可达（`40034101`、`40054002`、`40054003` 等） | 立即抛出 `ApiError`，不重试 |
+| 其它未收录错误码 | 同样立即抛出，绝不重复投递 |
+
+单次逻辑发送的总时长上限为 60 秒，超时抛出 `MessageSendTimeoutError`（`TransportError`
+子类，带 `attempts` / `elapsed` / `timeout`）。重发过程中再次遇到 `40054005` 会立即停止：
+此时消息可能已经发出但 id 不可知。
+
+```python
+from botpy.protocol import MessageSendPolicy
+
+client = MyClient(
+    intents=intents,
+    send_policy=MessageSendPolicy(total_timeout=60.0, backoff_base=3.0),
+)
+```
+
 ### Webhook 模式
 
 ```python
@@ -356,6 +437,8 @@ client = MyClient(
 | [API 参考](./docs/API.md) | 新高层接口、统一发送、媒体、REST 和 Interaction |
 | [自定义菜单与指令面板](./docs/MENU_PANEL.md) | 声明式 Menu/Panel、启动同步和多副本部署风险 |
 | [群管理 API 与事件](./docs/GROUP_MANAGEMENT.md) | 群信息、入群审批、成员禁言、自动审批策略和群成员事件 |
+| [请求整流与接口限速](./docs/RATE_LIMITS.md) | 通道划分、文档核对后的接口配额表和整流配置 |
+| [消息发送失败处理](./docs/SEND_ERRORS.md) | `err_code` 分类、回退主动消息、换 seq 与指数退避规则 |
 | [迁移指南](./MIGRATION.md) | 协议层改造后的行为变化与不兼容项 |
 | [Loguru 配置指南](./docs/LOGURU.md) | 日志桥接、轮转、结构化字段和根 logger 接管 |
 | [发布指南](./docs/RELEASING.md) | GitHub Release、版本校验和 PyPI Trusted Publishing |

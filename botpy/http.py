@@ -9,6 +9,7 @@ from .protocol.errors import ApiError
 from .protocol.constants import DEFAULT_API_BASE_URL, DEFAULT_SANDBOX_API_BASE_URL
 from .protocol.http import ApiClient, _safe_url
 from .protocol.proxy import ProxyConfig, describe_proxy, normalize_proxy
+from .protocol.ratelimit import RateLimiter, build_limiter
 from .robot import Token
 from .types import robot
 
@@ -58,10 +59,7 @@ class Route:
 
 
 class BotHttp:
-    """
-    TODO 增加请求重试功能 @veehou
-    TODO 增加并发请求的锁控制 @veehou
-    """
+    """底层 REST 客户端：负责鉴权、重试与出站速率整流。"""
 
     def __init__(
         self,
@@ -74,6 +72,7 @@ class BotHttp:
         user_agent: str = "qq-botpy",
         ssl: Any = None,
         proxy: Optional[ProxyConfig] = None,
+        rate_limit: Any = None,
     ):
         self.timeout = timeout
         self.is_sandbox = is_sandbox
@@ -83,6 +82,8 @@ class BotHttp:
         self.user_agent = user_agent
         self.ssl = ssl
         self.proxy = normalize_proxy(proxy)
+        # ``None`` 表示沿用文档核对后的默认限制（默认启用整流）。
+        self.rate_limiter: Optional[RateLimiter] = build_limiter(rate_limit)
 
         self._token: Optional[Token] = (
             None
@@ -135,6 +136,7 @@ class BotHttp:
                 user_agent=self.user_agent,
                 ssl=self.ssl,
                 proxy=self.proxy,
+                rate_limiter=self.rate_limiter,
                 logger=_log,
             )
 
@@ -195,6 +197,7 @@ class BotHttp:
                 retry_ambiguous=retry_ambiguous,
                 timeout=timeout,
                 before_attempt=before_attempt,
+                route_template=route.path,
             )
         except ApiError as error:
             exception_type = HttpErrorDict.get(error.status, ServerError)

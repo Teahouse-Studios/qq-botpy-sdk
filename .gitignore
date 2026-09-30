@@ -148,3 +148,6 @@ temp/
 
 # vscode config
 .vscode
+
+# generated_docs
+generated_docs/

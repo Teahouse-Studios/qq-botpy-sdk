@@ -10,6 +10,7 @@ import httpx
 from .errors import ApiError, TransportError
 from .constants import DEFAULT_API_BASE_URL
 from .proxy import ProxyConfig, describe_proxy, normalize_proxy
+from .ratelimit import RateLimiter
 
 
 TRACE_ID_HEADER = "X-Tps-trace-Id"
@@ -155,6 +156,7 @@ class ApiClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         ssl: Any = None,
         proxy: Optional[ProxyConfig] = None,
+        rate_limiter: Optional[RateLimiter] = None,
     ) -> None:
         self.token_provider = token_provider
         self.base_url = base_url.rstrip("/")
@@ -180,6 +182,9 @@ class ApiClient:
         # An injected ``session`` already carries its own transport settings, so
         # the proxy only applies to sessions this client creates itself.
         self.proxy = normalize_proxy(proxy)
+        if rate_limiter is not None and not isinstance(rate_limiter, RateLimiter):
+            raise TypeError("rate_limiter must be a RateLimiter instance or None")
+        self.rate_limiter = rate_limiter
         if not isinstance(user_agent, str) or any(
             ord(character) < 32 or ord(character) == 127 for character in user_agent
         ):
@@ -224,6 +229,7 @@ class ApiClient:
         retry_ambiguous: bool = False,
         timeout: Optional[float] = None,
         before_attempt: Optional[Callable[[], Awaitable[None]]] = None,
+        route_template: Optional[str] = None,
     ) -> Any:
         self._ensure_open()
         method = method.upper()
@@ -247,6 +253,9 @@ class ApiClient:
         last_error: Optional[BaseException] = None
         retry_count = 0
         request_attempts = 0
+        # 平台的频率限制按 api.bot.qq.com 上的接口计算；媒体预签名地址等外部
+        # 主机的传输不应消耗接口配额，也不该被接口队列拖慢。
+        limiter = self.rate_limiter if (self.rate_limiter and self._targets_api(url)) else None
 
         while True:
             try:
@@ -269,17 +278,30 @@ class ApiClient:
                 # A session can be closed between attempts during lifecycle changes. Re-check it
                 # instead of pinning a stale object for the entire retry loop.
                 session = await self._get_session()
-                request_attempts += 1
-                response = await session.request(
-                    method,
-                    url,
-                    params=params,
-                    json=json_body,
-                    data=data,
-                    files=files,
-                    headers=request_headers,
-                    timeout=httpx.Timeout(self.timeout if timeout is None else timeout),
-                )
+                # 每一次真实发出的请求（含重试与 401 重放）都要重新排队取令牌。
+                if limiter is not None:
+                    await limiter.acquire(
+                        method,
+                        path,
+                        json_body=json_body,
+                        route_template=route_template,
+                    )
+                    await limiter.acquire_slot()
+                try:
+                    request_attempts += 1
+                    response = await session.request(
+                        method,
+                        url,
+                        params=params,
+                        json=json_body,
+                        data=data,
+                        files=files,
+                        headers=request_headers,
+                        timeout=httpx.Timeout(self.timeout if timeout is None else timeout),
+                    )
+                finally:
+                    if limiter is not None:
+                        limiter.release_slot()
                 payload = await self._read_response(response)
                 trace_id = response.headers.get(TRACE_ID_HEADER)
 
@@ -315,6 +337,15 @@ class ApiClient:
                     url=log_url,
                     retry_after=retry_after,
                 )
+                if response.status_code == 429 and limiter is not None:
+                    # 让同通道的其它请求一起退避，而不是各自撞一次 429。
+                    limiter.notify_rate_limited(
+                        method,
+                        path,
+                        json_body=json_body,
+                        route_template=route_template,
+                        retry_after=retry_after,
+                    )
                 retryable_status = response.status_code == 429 or response.status_code >= 500
                 if retryable_status and can_retry_status and retry_count < max_retries:
                     await self._sleep(retry_after if retry_after is not None else self._delay(retry_count))
@@ -426,6 +457,22 @@ class ApiClient:
     @staticmethod
     def _default_port(scheme: str) -> int:
         return 443 if scheme.lower() == "https" else 80
+
+    def _targets_api(self, url: str) -> bool:
+        """判断请求是否落在配置的 API 根地址上（只有这类请求计入平台频控）。"""
+
+        target = urlsplit(url)
+        base = urlsplit(self.base_url)
+        try:
+            target_port = target.port or self._default_port(target.scheme)
+            base_port = base.port or self._default_port(base.scheme)
+        except ValueError:
+            return False
+        return (target.scheme.lower(), target.hostname, target_port) == (
+            base.scheme.lower(),
+            base.hostname,
+            base_port,
+        )
 
     def _delay(self, attempt: int) -> float:
         return self.retry_base_delay * (2**attempt)

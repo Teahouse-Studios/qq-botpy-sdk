@@ -7,7 +7,7 @@ import traceback
 from collections import OrderedDict
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Coroutine, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+from typing import Any, Callable, Coroutine, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple, Type, Union
 from urllib.parse import unquote, urlparse
 from weakref import WeakSet
 
@@ -34,7 +34,9 @@ from .protocol.message import (
 )
 from .protocol.models import InboundMessage, InteractionContext, RawEvent, ReplyTarget
 from .protocol.proxy import ProxyConfig, normalize_proxy
+from .protocol.ratelimit import RateLimiter
 from .protocol.reply import ReplyLimiter
+from .protocol.send_policy import MessageSendPolicy
 from .protocol.session import SessionStore
 from .protocol.streaming import DEFAULT_STREAM_THROTTLE_MS, StreamSession
 from .protocol.text import TEXT_CHUNK_LIMIT, chunk_text
@@ -106,6 +108,7 @@ class Client:
         ssl: Any = None,
         upload_cache: Optional[UploadCache] = None,
         reply_limiter: Optional[ReplyLimiter] = None,
+        send_policy: Optional[MessageSendPolicy] = None,
         on_message_sent: Optional[Callable[[str, Mapping[str, Any]], Any]] = None,
         loguru_logger: Any = None,
         menu: Optional[Menu] = None,
@@ -113,6 +116,7 @@ class Client:
         config_sync_strict: bool = False,
         gateway_send_timeout: Optional[float] = 30.0,
         proxy: Optional[ProxyConfig] = None,
+        rate_limit: Union[bool, "RateLimiter", Mapping[str, Any], None] = None,
     ):
         """
         Args:
@@ -135,6 +139,8 @@ class Client:
           ssl: 传给 httpx/httpx-ws 的 SSLContext 或布尔值。
           upload_cache: 自定义媒体上传缓存；默认每个 Client 独享一份内存缓存。
           reply_limiter: 自定义被动回复限制器；默认每条消息每小时最多 4 次。
+          send_policy: 自定义消息发送失败策略；默认按平台 ``err_code`` 决定回退主动
+            消息、换 ``msg_seq`` 重发或按 3/6/12/24 秒指数退避重发，总时长上限 60 秒。
           on_message_sent: 平台响应包含 ``ext_info.ref_idx`` 时调用的出站消息钩子。
           loguru_logger: 可选的 Loguru logger；提供后 botpy 标准库日志会转发到该 logger。
           menu: 可选的声明式 C2C 全局菜单；配置后在登录成功时按差异同步。
@@ -142,6 +148,9 @@ class Client:
           config_sync_strict: 配置同步失败时是否中止客户端启动。
           gateway_send_timeout: Gateway 重连期间等待消息发送恢复的秒数；``None`` 表示一直等待。
           proxy: 可选 HTTP 代理，作用于 REST API、access token 和 Gateway WebSocket。
+          rate_limit: 出站请求整流配置。默认启用，按官方文档核对后的接口频率限制
+            排队限速；``False`` 关闭整流，也可以传入
+            :class:`botpy.protocol.RateLimiter` 或参数字典自定义。
         """
         self.intents: int = intents.value
         self.ret_coro: bool = False
@@ -185,6 +194,7 @@ class Client:
             user_agent=user_agent,
             ssl=ssl,
             proxy=self._proxy,
+            rate_limit=rate_limit,
         )
         self.api: BotAPI = BotAPI(http=self.http, message_guard=self._wait_for_gateway_ready)
         self.configuration = ConfigurationManager(
@@ -207,6 +217,7 @@ class Client:
         self._middlewares = list(middlewares or ())
         self._reply_sequences: "OrderedDict[str, int]" = OrderedDict()
         self._reply_limiter = reply_limiter or ReplyLimiter()
+        self._send_policy = send_policy or MessageSendPolicy(logger=_log)
         self._upload_cache = upload_cache or UploadCache(logger=_log)
         if on_message_sent is not None and not callable(on_message_sent):
             raise TypeError("on_message_sent must be callable")
@@ -400,8 +411,16 @@ class Client:
             if "msg_seq" not in payload and payload.get("msg_id"):
                 payload["msg_seq"] = Client._next_reply_sequence(self, payload.get("msg_id"))
             method = self.api.post_c2c_message if target.scope == "c2c" else self.api.post_group_message
-            result = await method(target.target_id, **payload)
-            if passive_message_id:
+
+            async def send_passive_once(current: MutableMapping[str, Any]):
+                return await method(target.target_id, **current)
+
+            result = await Client._message_send_policy(self).execute(
+                payload,
+                send_passive_once,
+                next_sequence=lambda current: Client._next_reply_sequence(self, current.get("msg_id")),
+            )
+            if passive_message_id and payload.get("msg_id"):
                 self._reply_limiter.record(passive_message_id)
             await Client._notify_message_sent(
                 self,
@@ -416,7 +435,11 @@ class Client:
             payload.pop("msg_type", None)
             payload.pop("msg_seq", None)
             method = self.api.post_message if target.scope == "channel" else self.api.post_dms
-            result = await method(target.target_id, **payload)
+
+            async def send_channel_once(current: MutableMapping[str, Any]):
+                return await method(target.target_id, **current)
+
+            result = await Client._message_send_policy(self).execute(payload, send_channel_once)
             await Client._notify_message_sent(
                 self,
                 result,
@@ -425,6 +448,15 @@ class Client:
             return result
 
         raise ValueError(f"unsupported reply target scope: {target.scope}")
+
+    def _message_send_policy(self) -> MessageSendPolicy:
+        """返回消息发送失败策略；兼容只提供 ``api`` 的轻量客户端替身。"""
+
+        policy = getattr(self, "_send_policy", None)
+        if policy is None:
+            policy = MessageSendPolicy(logger=_log)
+            self._send_policy = policy
+        return policy
 
     @staticmethod
     def _infer_message_type(payload: Mapping[str, Any]) -> MessageType:
