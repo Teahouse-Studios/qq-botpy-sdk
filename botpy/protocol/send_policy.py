@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Optional
 import httpx
 
 from .errors import ApiError, TransportError, extract_error_code
+from .http import _request_was_not_sent
 
 __all__ = [
     "SendErrorCategory",
@@ -53,6 +54,18 @@ __all__ = [
 
 DEFAULT_TOTAL_TIMEOUT = 60.0
 DEFAULT_BACKOFF_BASE = 3.0
+
+#: 被动回复标记：带任意一个即表示这是对某条入站消息的回复。
+_PASSIVE_MARKERS = ("msg_id", "event_id")
+
+
+def _is_passive_payload(payload: Any) -> bool:
+    """请求体是否带有被动回复标记（``msg_id`` / ``event_id``）。"""
+
+    if not isinstance(payload, Mapping):
+        return False
+    return any(payload.get(marker) for marker in _PASSIVE_MARKERS)
+
 
 #: 真正的网络层失败（超时、连接中断、协议错误、代理错误）；``UnsupportedProtocol``
 #: 这类配置错误不在其中，重发它只会白白等待。
@@ -246,6 +259,9 @@ class MessageSendPolicy:
       total_timeout: 单次逻辑发送的总时长预算，默认 60 秒。
       backoff_base: 指数退避基数，默认 3 秒；第 n 次重发等待 ``base * 2 ** (n-1)``。
       max_attempts: 可选的硬性尝试次数上限，``None`` 表示只受总时长约束。
+      replay_ambiguous_proactive: 主动消息在「已发出但结果未知」的网络失败下是否也
+        退避重发。默认 ``False``：主动消息没有去重保护，重发可能让用户收到两条消息；
+        设为 ``True`` 可恢复旧行为（被动回复始终重发，因为它们有 ``msg_id`` 去重）。
       clock / sleep: 便于测试注入。
     """
 
@@ -255,6 +271,7 @@ class MessageSendPolicy:
         total_timeout: float = DEFAULT_TOTAL_TIMEOUT,
         backoff_base: float = DEFAULT_BACKOFF_BASE,
         max_attempts: Optional[int] = None,
+        replay_ambiguous_proactive: bool = False,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         logger: Optional[logging.Logger] = None,
@@ -268,6 +285,7 @@ class MessageSendPolicy:
         self.total_timeout = float(total_timeout)
         self.backoff_base = float(backoff_base)
         self.max_attempts = max_attempts
+        self.replay_ambiguous_proactive = bool(replay_ambiguous_proactive)
         self._clock = clock
         self._sleep = sleep
         self._logger = logger or logging.getLogger("botpy.protocol.send_policy")
@@ -337,25 +355,23 @@ class MessageSendPolicy:
                     # HTTP 429 通常不带 err_code，但语义上和频控类错误一致。
                     category = SendErrorCategory.TRANSIENT
             except (asyncio.TimeoutError, httpx.HTTPError) as error:
-                # 直接冒出的网络层异常，没有经过 SDK 包装。``InvalidURL`` /
-                # ``UnsupportedProtocol`` 这类配置错误不在重试范围内。
+                # 直接冒出的网络层异常，没有经过 SDK 包装。
                 last_error = error
                 last_code = None
-                if isinstance(error, asyncio.TimeoutError) or isinstance(error, _NETWORK_CAUSE_TYPES):
-                    category = SendErrorCategory.TRANSIENT
-                else:
-                    category = None
+                category = SendErrorCategory.TRANSIENT if self._retryable_transport_failure(error, payload) else None
             except TransportError as error:
                 last_error = error
                 last_code = None
-                category = SendErrorCategory.TRANSIENT if self._is_wrapped_network_failure(error) else None
+                category = SendErrorCategory.TRANSIENT if self._retryable_transport_failure(error, payload) else None
 
             if category is None:
-                # 不是网络原因（例如 Gateway 未恢复、客户端已关闭），交给调用方处理。
+                # 不是可重发的网络原因（Gateway 未恢复、客户端已关闭、主动消息的
+                # 结果未知失败等），交给调用方处理。
                 raise last_error
 
             if category is SendErrorCategory.PASSIVE_FALLBACK:
                 if payload.get("msg_id") or payload.get("event_id"):
+                    self._ensure_budget(attempts, started, deadline, last_error, last_code)
                     self._logger.info(
                         "[botpy] 被动回复上下文已失效(err_code=%s: %s)，回退为主动消息重发",
                         last_code,
@@ -372,6 +388,7 @@ class MessageSendPolicy:
                 if attempts == 1 and not sequence_bumped and payload.get("msg_id") and next_sequence is not None:
                     sequence = next_sequence(payload)
                     if sequence is not None:
+                        self._ensure_budget(attempts, started, deadline, last_error, last_code)
                         self._logger.info(
                             "[botpy] 消息被去重(err_code=%s)，换 msg_seq=%s 重发一次",
                             last_code,
@@ -408,19 +425,47 @@ class MessageSendPolicy:
     def _is_rate_limited(error: ApiError) -> bool:
         return error.status == 429
 
-    @staticmethod
-    def _is_wrapped_network_failure(error: TransportError) -> bool:
-        """判断被 SDK 包装过的 :class:`TransportError` 是否源于真实的网络失败。
+    def _retryable_transport_failure(self, error: BaseException, payload: Mapping[str, Any]) -> bool:
+        """网络失败是否值得退避重发。
 
-        ``botpy`` 也用 ``TransportError`` 表达自身状态：Gateway 未就绪（``attempts=0``，
-        消息根本没发出）、重试被中止（``cause`` 是另一个 ``TransportError``）等。
-        这些重发没有意义，只有底层 ``cause`` 确实是 httpx 网络/超时异常、
-        且至少发出过一次请求时才退避重发。
+        ``InvalidURL`` / ``UnsupportedProtocol`` 这类配置错误不在重试范围内。更重要的
+        是区分两种网络失败：
+
+        * **请求确定没有发出**（连接失败、连接超时、连接池超时、客户端已关闭）：
+          重发不可能造成重复投递，任何消息都可以重试。
+        * **请求已发出但结果未知**（读超时、连接中断、协议错误）：重发可能让平台收到
+          第二条消息。只有被动回复能靠 ``(msg_id, msg_seq)`` 去重保护，主动消息默认
+          不重发，避免重复投递；确实需要时用 ``replay_ambiguous_proactive=True`` 显式开启。
         """
 
-        if error.attempts == 0:
+        underlying: BaseException = error
+        if isinstance(error, TransportError):
+            # SDK 自身状态（Gateway 未就绪、重试被中止、客户端已关闭）不重发。
+            if error.attempts == 0:
+                return False
+            if error.cause is not None:
+                underlying = error.cause
+
+        if not (isinstance(underlying, asyncio.TimeoutError) or isinstance(underlying, _NETWORK_CAUSE_TYPES)):
             return False
-        return isinstance(error.cause, _NETWORK_CAUSE_TYPES)
+        if _request_was_not_sent(underlying):
+            return True
+        return self.replay_ambiguous_proactive or _is_passive_payload(payload)
+
+    def _ensure_budget(
+        self,
+        attempts: int,
+        started: float,
+        deadline: float,
+        last_error: Optional[BaseException],
+        last_code: Optional[int],
+    ) -> None:
+        """回退主动消息 / 换 ``msg_seq`` 这类立即重发同样受次数与总时限约束。"""
+
+        if self.max_attempts is not None and attempts >= self.max_attempts:
+            raise self._timeout_error(last_error, last_code, attempts, started, deadline)
+        if self._clock() >= deadline:
+            raise self._timeout_error(last_error, last_code, attempts, started, deadline)
 
     async def _backoff(
         self,

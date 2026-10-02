@@ -230,6 +230,7 @@ class ApiClient:
         timeout: Optional[float] = None,
         before_attempt: Optional[Callable[[], Awaitable[None]]] = None,
         route_template: Optional[str] = None,
+        priority: Optional[int] = None,
     ) -> Any:
         self._ensure_open()
         method = method.upper()
@@ -258,36 +259,32 @@ class ApiClient:
         limiter = self.rate_limiter if (self.rate_limiter and self._targets_api(url)) else None
 
         while True:
-            try:
-                if before_attempt is not None:
-                    await before_attempt()
-                self._ensure_open()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if request_attempts:
-                    raise TransportError(
-                        f"HTTP {method} retry aborted before another request attempt",
-                        method=method,
-                        url=log_url,
-                        cause=exc,
-                        attempts=request_attempts,
-                    ) from exc
-                raise
+            await self._preflight(before_attempt, method, log_url, request_attempts)
             try:
                 # A session can be closed between attempts during lifecycle changes. Re-check it
                 # instead of pinning a stale object for the entire retry loop.
                 session = await self._get_session()
-                # 每一次真实发出的请求（含重试与 401 重放）都要重新排队取令牌。
+                slot_taken = False
                 if limiter is not None:
-                    await limiter.acquire(
-                        method,
-                        path,
-                        json_body=json_body,
-                        route_template=route_template,
-                    )
+                    # 先占并发槽位、再取限流令牌：令牌必须紧挨着「真正发出」消费。
+                    # 反过来的话，等待槽位期间会堆积令牌，槽位一释放就成串发出，
+                    # 反而绕过接口速率约束。
                     await limiter.acquire_slot()
+                    slot_taken = True
                 try:
+                    # 每一次真实发出的请求（含重试与 401 重放）都要重新排队取令牌。
+                    if limiter is not None:
+                        await limiter.acquire(
+                            method,
+                            path,
+                            json_body=json_body,
+                            route_template=route_template,
+                            priority=priority,
+                        )
+                        # 限流与槽位等待期间客户端可能被关闭、Gateway 也可能掉线，
+                        # 发送前重新确认，避免向已关闭的 session 发请求。
+                        await self._preflight(before_attempt, method, log_url, request_attempts)
+                        session = await self._get_session()
                     request_attempts += 1
                     response = await session.request(
                         method,
@@ -300,7 +297,7 @@ class ApiClient:
                         timeout=httpx.Timeout(self.timeout if timeout is None else timeout),
                     )
                 finally:
-                    if limiter is not None:
+                    if slot_taken:
                         limiter.release_slot()
                 payload = await self._read_response(response)
                 trace_id = response.headers.get(TRACE_ID_HEADER)
@@ -395,6 +392,36 @@ class ApiClient:
             cause=last_error,
             attempts=request_attempts,
         ) from last_error
+
+    async def _preflight(
+        self,
+        before_attempt: Optional[Callable[[], Awaitable[None]]],
+        method: str,
+        log_url: str,
+        request_attempts: int,
+    ) -> None:
+        """发送前的生命周期与就绪检查。
+
+        限流和并发槽位等待可能耗时很久，等待期间客户端可能被关闭、Gateway 也可能掉线，
+        因此这个检查在等待前后各执行一次。
+        """
+
+        try:
+            if before_attempt is not None:
+                await before_attempt()
+            self._ensure_open()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if request_attempts:
+                raise TransportError(
+                    f"HTTP {method} retry aborted before another request attempt",
+                    method=method,
+                    url=log_url,
+                    cause=exc,
+                    attempts=request_attempts,
+                ) from exc
+            raise
 
     async def _get_session(self) -> httpx.AsyncClient:
         self._ensure_open()

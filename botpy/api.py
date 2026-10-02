@@ -291,8 +291,13 @@ class BotAPI:
         json: Any = None,
         retry_unsafe: bool = False,
         timeout: Optional[float] = None,
+        priority: Optional[int] = None,
     ) -> Any:
-        """调用尚未被 SDK 封装的 QQ 开放平台 REST API。"""
+        """调用尚未被 SDK 封装的 QQ 开放平台 REST API。
+
+        ``priority`` 可指定排队优先级（``RequestPriority``）；省略时由整流器按请求
+        语义自动判定。
+        """
 
         if not isinstance(path, str) or not path.startswith("/"):
             raise ValueError("path must start with '/'")
@@ -303,6 +308,7 @@ class BotAPI:
             json=json,
             retry_unsafe=retry_unsafe,
             timeout=timeout,
+            priority=priority,
         )
 
     async def get(self, path: str, *, params: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> Any:

@@ -28,6 +28,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 __all__ = [
     "RateLimitBudget",
     "RateLimiter",
+    "RequestPriority",
     "RouteRule",
     "MessageQuota",
     "DEFAULT_ROUTE_RULES",
@@ -35,12 +36,15 @@ __all__ = [
     "DEFAULT_MAX_BUCKETS",
     "DEFAULT_MAX_PACING_WINDOW",
     "DEFAULT_PENALTY_SECONDS",
+    "DEFAULT_LOW_PRIORITY_INTERVAL",
     "normalise_template",
     "match_route",
 ]
 
 DEFAULT_MAX_BUCKETS = 4096
 DEFAULT_PENALTY_SECONDS = 1.0
+#: 连续放行多少个高/普通优先级请求后强制放行一个低优先级请求（防饿死）。
+DEFAULT_LOW_PRIORITY_INTERVAL = 4
 #: 窗口长于该值的配额（例如「每天 1000 条」）只做提示而不阻塞发送。
 DEFAULT_MAX_PACING_WINDOW = 3600.0
 _DAILY_WINDOW = 86400.0
@@ -276,6 +280,16 @@ PROACTIVE_BOT_BUDGETS: Dict[str, Dict[str, Tuple[RateLimitBudget, ...]]] = {
 }
 
 _PASSIVE_MARKERS = ("msg_id", "event_id")
+
+
+def _has_passive_marker(json_body: Any) -> bool:
+    """请求体里是否带有被动回复标记（``msg_id`` / ``event_id``）。"""
+
+    if not isinstance(json_body, Mapping):
+        return False
+    return any(json_body.get(marker) for marker in _PASSIVE_MARKERS)
+
+
 _QUOTA_KINDS = {
     "POST /v2/groups/{}/messages": "group",
     "POST /v2/users/{}/messages": "c2c",
@@ -354,15 +368,157 @@ class _TokenBucket:
         self.tokens = 0.0
         self.updated_at = now
 
+    def can_discard(self, now: float) -> bool:
+        """桶是否已完全恢复：丢弃它不会丢失任何配额或惩罚状态。
+
+        只有「补满到容量」且「惩罚已结束」的桶才可以安全回收——丢弃满桶等价于
+        丢弃一个从未使用过的桶。否则再次访问会拿到一个满令牌的新桶，等于把已经
+        消耗的平台配额和正在生效的退避惩罚静默清零。
+        """
+
+        elapsed = now - self.updated_at
+        restored = self.tokens if elapsed <= 0 else min(self.budget.capacity, self.tokens + elapsed * self.budget.rate)
+        return restored >= self.budget.capacity and self.blocked_until <= now
+
+
+class RequestPriority:
+    """出站请求的排队优先级；数值越小越先取得令牌。
+
+    优先级只决定**谁先拿到下一个令牌**，不会绕过令牌桶的速率约束：整体吞吐不变，
+    改变的只是延迟。这样大批量推送不会把队列占满而导致对话消息长时间排队。
+    """
+
+    #: 被动回复等对话消息：用户正在等响应，必须尽快发出。
+    INTERACTIVE = 0
+    #: 普通 API 调用。
+    NORMAL = 1
+    #: 主动 / 批量推送消息：数量大、可以延后。
+    BULK = 2
+
+
+_PRIORITY_NAMES = {
+    RequestPriority.INTERACTIVE: "interactive",
+    RequestPriority.NORMAL: "normal",
+    RequestPriority.BULK: "bulk",
+}
+
+
+class _Waiter:
+    """通道队列里的一个等待者。"""
+
+    __slots__ = ("priority", "sequence", "event", "granted")
+
+    def __init__(self, priority: int, sequence: int) -> None:
+        self.priority = priority
+        self.sequence = sequence
+        self.event = asyncio.Event()
+        self.granted = False
+
+
+class _PriorityGate:
+    """按优先级排队的互斥门：高优先级插到队头，先取得令牌。
+
+    ``asyncio.Lock`` 是严格 FIFO 的，一批批量推送会排在队头之前，把后面到达的对话
+    消息堵在队尾。这里换成显式优先队列：等待者按 ``(priority, sequence)`` 排序，
+    优先级高的先被放行，同优先级内部仍然是先到先发。
+
+    为避免低优先级被持续到来的高优先级请求彻底饿死，连续放行
+    ``low_priority_interval`` 个高/普通优先级请求后，会强制放行一个等待最久的
+    低优先级请求；``None`` 表示关闭该保护。
+    """
+
+    __slots__ = ("_waiters", "_busy", "_sequence", "_served_since_low", "_low_priority_interval")
+
+    def __init__(self, low_priority_interval: Optional[int]) -> None:
+        self._waiters: List[_Waiter] = []
+        self._busy = False
+        self._sequence = 0
+        self._served_since_low = 0
+        self._low_priority_interval = low_priority_interval
+
+    @property
+    def locked(self) -> bool:
+        return self._busy
+
+    @property
+    def waiting(self) -> int:
+        return len(self._waiters)
+
+    def waiting_by_priority(self) -> Dict[str, int]:
+        counts = {name: 0 for name in _PRIORITY_NAMES.values()}
+        for waiter in self._waiters:
+            counts[_PRIORITY_NAMES.get(waiter.priority, "normal")] += 1
+        return counts
+
+    async def acquire(self, priority: int) -> None:
+        # 空闲且无人排队时直接占用，避免每个请求都创建 Event。
+        if not self._busy and not self._waiters:
+            self._busy = True
+            return
+        waiter = _Waiter(priority, self._sequence)
+        self._sequence += 1
+        self._waiters.append(waiter)
+        try:
+            await waiter.event.wait()
+        except BaseException:
+            # 被取消：已经拿到所有权就必须把所有权交出去，否则通道会永久卡死；
+            # 还没拿到就从队列里摘掉，让后面的等待者补位。
+            if waiter.granted:
+                self._hand_over()
+            else:
+                self._discard(waiter)
+            raise
+
+    def release(self) -> None:
+        self._hand_over()
+
+    def _discard(self, waiter: _Waiter) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            pass
+
+    def _select(self) -> _Waiter:
+        if self._low_priority_interval is not None and self._served_since_low >= self._low_priority_interval:
+            bulk = [waiter for waiter in self._waiters if waiter.priority >= RequestPriority.BULK]
+            if bulk:
+                self._served_since_low = 0
+                return min(bulk, key=lambda waiter: waiter.sequence)
+        best = min(self._waiters, key=lambda waiter: (waiter.priority, waiter.sequence))
+        if best.priority >= RequestPriority.BULK:
+            self._served_since_low = 0
+        else:
+            self._served_since_low += 1
+        return best
+
+    def _hand_over(self) -> None:
+        """把所有权交给队首；没有等待者则回到空闲。"""
+
+        while self._waiters:
+            waiter = self._select()
+            self._discard(waiter)
+            if waiter.granted:  # pragma: no cover - 防御性分支
+                continue
+            # granted 与 event.set() 之间没有 await，取消不会插在中间。
+            waiter.granted = True
+            waiter.event.set()
+            return
+        self._busy = False
+
 
 class _Channel:
-    """一个逻辑通道：若干令牌桶 + 一把保证先到先发的排队锁。"""
+    """一个逻辑通道：若干令牌桶 + 一个按优先级排队的门。"""
 
-    __slots__ = ("budgets", "lock", "buckets", "pending")
+    __slots__ = ("budgets", "gate", "buckets", "pending")
 
-    def __init__(self, budgets: Sequence[RateLimitBudget], clock: Callable[[], float]) -> None:
+    def __init__(
+        self,
+        budgets: Sequence[RateLimitBudget],
+        clock: Callable[[], float],
+        low_priority_interval: Optional[int],
+    ) -> None:
         self.budgets = tuple(budgets)
-        self.lock = asyncio.Lock()
+        self.gate = _PriorityGate(low_priority_interval)
         self.buckets = tuple(_TokenBucket(budget, clock) for budget in budgets)
         self.pending = 0
 
@@ -382,6 +538,8 @@ class RateLimiter:
       max_buckets: 通道注册表上限，超出后按 LRU 回收空闲通道。
       default_penalty: 收到 ``429`` 但响应未带 ``Retry-After`` 时的默认惩罚秒数。
       max_pacing_window: 窗口长于该值的配额视为「每日额度」，只提示不阻塞。
+      low_priority_interval: 连续放行多少个高/普通优先级请求后强制放行一个低优先级
+        请求，避免批量推送被持续到来的对话消息饿死；``None`` 关闭该保护。
       clock / sleep: 便于测试注入。
     """
 
@@ -396,6 +554,7 @@ class RateLimiter:
         max_buckets: int = DEFAULT_MAX_BUCKETS,
         default_penalty: float = DEFAULT_PENALTY_SECONDS,
         max_pacing_window: float = DEFAULT_MAX_PACING_WINDOW,
+        low_priority_interval: Optional[int] = DEFAULT_LOW_PRIORITY_INTERVAL,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         logger: Optional[logging.Logger] = None,
@@ -413,6 +572,12 @@ class RateLimiter:
             raise ValueError("default_penalty must not be negative")
         if max_pacing_window <= 0:
             raise ValueError("max_pacing_window must be positive")
+        if low_priority_interval is not None and (
+            isinstance(low_priority_interval, bool)
+            or not isinstance(low_priority_interval, int)
+            or low_priority_interval <= 0
+        ):
+            raise ValueError("low_priority_interval must be a positive integer or None")
 
         self.enabled = enabled
         self.max_concurrency = max_concurrency
@@ -420,6 +585,7 @@ class RateLimiter:
         self.default_penalty = float(default_penalty)
         self.max_buckets = max_buckets
         self.max_pacing_window = float(max_pacing_window)
+        self.low_priority_interval = low_priority_interval
         self._clock = clock
         self._sleep = sleep
         self._logger = logger or logging.getLogger("botpy.protocol.ratelimit")
@@ -473,13 +639,25 @@ class RateLimiter:
         *,
         json_body: Any = None,
         route_template: Optional[str] = None,
+        priority: Optional[int] = None,
     ) -> None:
-        """在当前协程抢占发送配额；必要时排队等待，返回即代表可以立即发出。"""
+        """在当前协程抢占发送配额；必要时排队等待，返回即代表可以立即发出。
+
+        ``priority`` 省略时按请求语义自动判定：被动回复（带 ``msg_id``/``event_id``）
+        是对话消息，插到队头；主动消息属于批量推送，排在其后。
+        """
 
         if not self.enabled:
             return
-        for key, budgets in self._plan(method, path, json_body=json_body, route_template=route_template):
-            await self._acquire_channel(key, budgets)
+        planned, resolved = self._resolve(
+            method,
+            path,
+            json_body=json_body,
+            route_template=route_template,
+            priority=priority,
+        )
+        for key, budgets in planned:
+            await self._acquire_channel(key, budgets, resolved)
 
     async def acquire_slot(self) -> None:
         """占用一个全局在途请求名额（未配置 ``max_concurrency`` 时为空操作）。"""
@@ -506,7 +684,7 @@ class RateLimiter:
             return
         penalty = self.default_penalty if retry_after is None else max(0.0, float(retry_after))
         now = self._clock()
-        for key, budgets in self._plan(method, path, json_body=json_body, route_template=route_template):
+        for key, budgets in self._plan(method, path, json_body=json_body, route_template=route_template)[1]:
             channel = self._channel(key, budgets)
             for bucket in channel.buckets:
                 bucket.penalise(now, penalty)
@@ -527,6 +705,7 @@ class RateLimiter:
                 {
                     "key": " ".join(str(part) for part in key),
                     "pending": channel.pending,
+                    "waiting_by_priority": channel.gate.waiting_by_priority(),
                     "budgets": [budget.describe() for budget in channel.budgets],
                     "available": [round(bucket.tokens, 3) for bucket in channel.buckets],
                 }
@@ -548,9 +727,37 @@ class RateLimiter:
     ) -> List[Tuple[Tuple[Any, ...], Tuple[RateLimitBudget, ...]]]:
         """公开 :meth:`_plan`，用于配置核对与测试断言。"""
 
-        return self._plan(method, path, json_body=json_body, route_template=route_template)
+        return self._plan(method, path, json_body=json_body, route_template=route_template)[1]
 
     # -- 内部实现 ---------------------------------------------------------- #
+    def _resolve(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Any,
+        route_template: Optional[str],
+        priority: Optional[int],
+    ) -> Tuple[List[Tuple[Tuple[Any, ...], Tuple[RateLimitBudget, ...]]], int]:
+        matched, planned = self._plan(method, path, json_body=json_body, route_template=route_template)
+        if priority is None:
+            priority = self._derive_priority(matched, json_body)
+        return planned, priority
+
+    def _derive_priority(self, matched: Optional[str], json_body: Any) -> int:
+        """按请求语义判定排队优先级。
+
+        只有消息发送接口区分主动/被动：带 ``msg_id`` 或 ``event_id`` 的是被动回复，
+        即用户正在等待的对话消息，插到队头；主动消息按批量推送处理，排在其后。
+        其余接口一律普通优先级。
+        """
+
+        if matched is None or self._rules[matched].quota is None:
+            return RequestPriority.NORMAL
+        if _has_passive_marker(json_body):
+            return RequestPriority.INTERACTIVE
+        return RequestPriority.BULK
+
     def _plan(
         self,
         method: str,
@@ -558,7 +765,7 @@ class RateLimiter:
         *,
         json_body: Any,
         route_template: Optional[str],
-    ) -> List[Tuple[Tuple[Any, ...], Tuple[RateLimitBudget, ...]]]:
+    ) -> Tuple[Optional[str], List[Tuple[Tuple[Any, ...], Tuple[RateLimitBudget, ...]]]]:
         method = str(method).upper()
         template = normalise_template(route_template) if route_template else None
         matched = None
@@ -607,7 +814,7 @@ class RateLimiter:
                         add(("proactive", matched, resource), quota.relationship_budgets)
 
         # 固定顺序加锁，避免同一请求持有多把通道锁时与其它请求交叉死锁。
-        return sorted(planned.items(), key=lambda item: item[0])
+        return matched, sorted(planned.items(), key=lambda item: item[0])
 
     @staticmethod
     def _is_proactive(quota: MessageQuota, json_body: Any) -> bool:
@@ -617,7 +824,7 @@ class RateLimiter:
             return False
         if not isinstance(json_body, Mapping):
             return True
-        return not any(json_body.get(marker) for marker in _PASSIVE_MARKERS)
+        return not _has_passive_marker(json_body)
 
     @staticmethod
     def _resource_id(matched: str, path: str) -> Optional[str]:
@@ -638,7 +845,7 @@ class RateLimiter:
         if channel is not None and channel.budgets == tuple(budgets):
             self._channels.move_to_end(key)
             return channel
-        channel = _Channel(budgets, self._clock)
+        channel = _Channel(budgets, self._clock, self.low_priority_interval)
         self._channels[key] = channel
         self._channels.move_to_end(key)
         self._evict()
@@ -647,23 +854,36 @@ class RateLimiter:
     def _evict(self) -> None:
         if len(self._channels) <= self.max_buckets:
             return
-        # 最近使用的通道永远位于末尾；只从更旧的条目里回收，且跳过正在排队或
-        # 持有锁的通道，避免把仍在使用的令牌桶丢掉。
+        # 最近使用的通道永远位于末尾；只从更旧的条目里回收，且跳过正在排队、
+        # 持有门的通道，以及令牌桶尚未恢复（含惩罚生效中）的通道。
+        #
+        # 回收一个「已经消耗过令牌」的桶会静默把平台配额清零：再次访问时会新建一个
+        # 满令牌的桶，本来该等待的请求会立即放行。因此这里只回收完全恢复的通道，
+        # 代价是当所有通道都还有未恢复的状态时注册表会超过 max_buckets——宁可多占
+        # 一点内存，也不能绕过平台限速。
+        now = self._clock()
         for key in list(self._channels.keys())[:-1]:
             if len(self._channels) <= self.max_buckets:
                 break
             channel = self._channels[key]
-            if channel.lock.locked() or channel.pending:
+            if channel.gate.locked or channel.pending:
                 continue
-            del self._channels[key]
+            if all(bucket.can_discard(now) for bucket in channel.buckets):
+                del self._channels[key]
 
-    async def _acquire_channel(self, key: Tuple[Any, ...], budgets: Sequence[RateLimitBudget]) -> None:
+    async def _acquire_channel(
+        self,
+        key: Tuple[Any, ...],
+        budgets: Sequence[RateLimitBudget],
+        priority: int,
+    ) -> None:
         channel = self._channel(key, budgets)
         channel.pending += 1
         try:
-            # 每个通道一把锁：等待者按到达顺序排队，锁内只做「等令牌 + 取令牌」，
-            # 因此同一通道的请求天然被整形成均匀间隔。
-            async with channel.lock:
+            # 每个通道一个按优先级排队的门：门内只做「等令牌 + 取令牌」，因此同一
+            # 通道的请求仍被整形成均匀间隔，只是高优先级插到队头先取令牌。
+            await channel.gate.acquire(priority)
+            try:
                 while True:
                     now = self._clock()
                     delay = 0.0
@@ -694,6 +914,8 @@ class RateLimiter:
                             delay,
                         )
                     await self._sleep(delay)
+            finally:
+                channel.gate.release()
         finally:
             channel.pending -= 1
 

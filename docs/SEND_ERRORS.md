@@ -82,6 +82,25 @@
 只有**真正的网络失败**才退避重发。botpy 的 `TransportError` 也用于表达 SDK 自身状态
 （Gateway 未就绪 `attempts=0`、重试被中止、客户端已关闭），这些不会被重发，避免无谓等待。
 
+#### 主动消息不重放「结果未知」的失败
+
+网络失败还要再分两类：
+
+| 失败类型 | 例子 | 是否重发 |
+| --- | --- | --- |
+| **请求确定没有发出** | 连接失败、连接超时、连接池超时、客户端已关闭 | 是，任何消息都重发（不可能重复投递） |
+| **请求已发出但结果未知** | 读超时、连接中断、协议错误 | 被动回复重发；主动消息**默认不重发** |
+
+主动消息没有 `(msg_id, msg_seq)` 去重保护，重发可能让用户收到两条；被动回复有去重保护，
+可以安全重发。需要恢复「主动消息也重发」的旧行为时显式开启：
+
+```python
+MessageSendPolicy(replay_ambiguous_proactive=True)
+```
+
+**总时长上限与次数上限对回退/换 seq 同样生效**：回退主动消息和换 `msg_seq` 重发这类立即
+重发也会经过同一套 `max_attempts` 与 60 秒预算检查，不会绕过预算。
+
 ### 4. 立即抛错
 
 `40034101`（机器人非群成员）、`40054002`（机器人被禁言）、`40054003`（机器人不是群成员）
@@ -106,9 +125,10 @@ from botpy.protocol import MessageSendPolicy
 client = MyClient(
     intents=intents,
     send_policy=MessageSendPolicy(
-        total_timeout=60.0,   # 单次逻辑发送的总时长预算
-        backoff_base=3.0,     # 指数退避基数：3、6、12、24……
-        max_attempts=None,    # 可选硬上限，None 表示只受总时长约束
+        total_timeout=60.0,             # 单次逻辑发送的总时长预算
+        backoff_base=3.0,               # 指数退避基数：3、6、12、24……
+        max_attempts=None,              # 可选硬上限，None 表示只受总时长约束
+        replay_ambiguous_proactive=False,  # 默认不重放主动消息「结果未知」的失败
     ),
 )
 ```

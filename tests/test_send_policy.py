@@ -403,10 +403,35 @@ class TransientRetryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NetworkFailureTests(unittest.IsolatedAsyncioTestCase):
-    async def test_direct_httpx_timeout_retries(self):
+    async def test_passive_reply_retries_ambiguous_timeout(self):
+        # 被动回复有 (msg_id, msg_seq) 去重保护，结果未知也可以安全重发。
         policy, clock = make_policy()
         attempt, _seen = scripted([httpx.ReadTimeout("slow"), {"id": "ok"}])
+        self.assertEqual({"id": "ok"}, await policy.execute({"content": "hi", "msg_id": "m"}, attempt))
+        self.assertEqual([3.0], clock.sleeps)
+
+    async def test_proactive_ambiguous_timeout_is_not_replayed(self):
+        # 主动消息没有去重保护，重发可能让用户收到两条，默认不重发。
+        policy, clock = make_policy()
+        attempt, seen = scripted([httpx.ReadTimeout("slow"), {"id": "ok"}])
+        with self.assertRaises(httpx.ReadTimeout):
+            await policy.execute({"content": "hi"}, attempt)
+        self.assertEqual(1, len(seen))
+        self.assertEqual([], clock.sleeps)
+
+    async def test_proactive_ambiguous_timeout_replays_when_opted_in(self):
+        policy, clock = make_policy(replay_ambiguous_proactive=True)
+        attempt, seen = scripted([httpx.ReadTimeout("slow"), {"id": "ok"}])
         self.assertEqual({"id": "ok"}, await policy.execute({"content": "hi"}, attempt))
+        self.assertEqual(2, len(seen))
+        self.assertEqual([3.0], clock.sleeps)
+
+    async def test_proactive_retries_when_request_was_never_sent(self):
+        # 请求确定没发出，重发不可能重复投递，主动消息也照常重发。
+        policy, clock = make_policy()
+        attempt, seen = scripted([httpx.ConnectError("refused"), {"id": "ok"}])
+        self.assertEqual({"id": "ok"}, await policy.execute({"content": "hi"}, attempt))
+        self.assertEqual(2, len(seen))
         self.assertEqual([3.0], clock.sleeps)
 
     async def test_direct_httpx_connect_error_retries(self):
@@ -423,9 +448,27 @@ class NetworkFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], clock.sleeps)
         self.assertEqual(1, len(seen))
 
-    async def test_wrapped_network_failure_retries(self):
+    async def test_wrapped_network_failure_retries_for_passive_reply(self):
         policy, clock = make_policy()
         wrapped = TransportError("HTTP POST request failed", method="POST", cause=httpx.ReadTimeout("t"), attempts=2)
+        attempt, _seen = scripted([wrapped, {"id": "ok"}])
+        self.assertEqual({"id": "ok"}, await policy.execute({"content": "hi", "msg_id": "m"}, attempt))
+        self.assertEqual([3.0], clock.sleeps)
+
+    async def test_wrapped_network_failure_is_not_replayed_for_proactive(self):
+        policy, clock = make_policy()
+        wrapped = TransportError("HTTP POST request failed", method="POST", cause=httpx.ReadTimeout("t"), attempts=2)
+        attempt, seen = scripted([wrapped, {"id": "ok"}])
+        with self.assertRaises(TransportError):
+            await policy.execute({"content": "hi"}, attempt)
+        self.assertEqual(1, len(seen))
+        self.assertEqual([], clock.sleeps)
+
+    async def test_connect_failure_retries_even_for_proactive(self):
+        policy, clock = make_policy()
+        wrapped = TransportError(
+            "HTTP POST request failed", method="POST", cause=httpx.ConnectError("refused"), attempts=1
+        )
         attempt, _seen = scripted([wrapped, {"id": "ok"}])
         self.assertEqual({"id": "ok"}, await policy.execute({"content": "hi"}, attempt))
         self.assertEqual([3.0], clock.sleeps)
@@ -650,6 +693,68 @@ class ClientSendIntegrationTests(unittest.IsolatedAsyncioTestCase):
         target = ReplyTarget(scope="group", target_id="group-1")
         self.assertEqual({"id": "sent"}, await Client.send(client, target, content="hi"))
         await client.close()
+
+
+class SendBudgetTests(unittest.IsolatedAsyncioTestCase):
+    """回退主动消息 / 换 msg_seq 这类立即重发同样受 max_attempts 与总时限约束。"""
+
+    async def test_fallback_respects_max_attempts(self):
+        policy, clock = make_policy(max_attempts=1)
+        attempt, seen = scripted([api_error(40034005), {"id": "ok"}])
+        with self.assertRaises(TransportError):
+            await policy.execute({"content": "hi", "msg_id": "m"}, attempt, next_sequence=lambda _p: 2)
+        self.assertEqual(1, len(seen))
+        self.assertEqual([], clock.sleeps)
+
+    async def test_duplicate_respects_max_attempts(self):
+        policy, clock = make_policy(max_attempts=1)
+        attempt, seen = scripted([api_error(40054005), {"id": "ok"}])
+        with self.assertRaises(TransportError):
+            await policy.execute({"content": "hi", "msg_id": "m", "msg_seq": 1}, attempt, next_sequence=lambda _p: 2)
+        self.assertEqual(1, len(seen))
+        self.assertEqual([], clock.sleeps)
+
+    async def test_fallback_respects_total_deadline(self):
+        policy, clock = make_policy(total_timeout=60.0)
+        calls = []
+
+        async def attempt(_payload):
+            calls.append(clock.now)
+            if len(calls) == 1:
+                clock.now += 61.0  # 首次失败时已经超出总预算
+                raise api_error(40034005)
+            return {"id": "ok"}
+
+        with self.assertRaises(TransportError) as caught:
+            await policy.execute({"content": "hi", "msg_id": "m"}, attempt, next_sequence=lambda _p: 2)
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual(61.0, caught.exception.elapsed)
+
+    async def test_duplicate_respects_total_deadline(self):
+        policy, clock = make_policy(total_timeout=60.0)
+        calls = []
+
+        async def attempt(_payload):
+            calls.append(clock.now)
+            if len(calls) == 1:
+                clock.now += 61.0
+                raise api_error(40054005)
+            return {"id": "ok"}
+
+        with self.assertRaises(TransportError) as caught:
+            await policy.execute({"content": "hi", "msg_id": "m", "msg_seq": 1}, attempt, next_sequence=lambda _p: 2)
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual(61.0, caught.exception.elapsed)
+
+    async def test_fallback_still_works_within_budget(self):
+        policy, clock = make_policy(max_attempts=3)
+        attempt, seen = scripted([api_error(40034005), {"id": "ok"}])
+        self.assertEqual(
+            {"id": "ok"}, await policy.execute({"content": "hi", "msg_id": "m"}, attempt, next_sequence=lambda _p: 2)
+        )
+        self.assertEqual(2, len(seen))
 
 
 if __name__ == "__main__":

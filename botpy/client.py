@@ -141,6 +141,9 @@ class Client:
           reply_limiter: 自定义被动回复限制器；默认每条消息每小时最多 4 次。
           send_policy: 自定义消息发送失败策略；默认按平台 ``err_code`` 决定回退主动
             消息、换 ``msg_seq`` 重发或按 3/6/12/24 秒指数退避重发，总时长上限 60 秒。
+            网络失败中「已发出但结果未知」的一类只有被动回复重发，主动消息默认不重发
+            （避免重复投递）；需要旧行为时传
+            :class:`~botpy.protocol.MessageSendPolicy` 并开启 ``replay_ambiguous_proactive``。
           on_message_sent: 平台响应包含 ``ext_info.ref_idx`` 时调用的出站消息钩子。
           loguru_logger: 可选的 Loguru logger；提供后 botpy 标准库日志会转发到该 logger。
           menu: 可选的声明式 C2C 全局菜单；配置后在登录成功时按差异同步。

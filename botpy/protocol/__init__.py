@@ -41,10 +41,12 @@ from .models import InboundAttachment, InboundMessage, InteractionContext, RawEv
 from .proxy import ProxyConfig, describe_proxy, normalize_proxy
 from .ratelimit import (
     DEFAULT_BUDGETS,
+    DEFAULT_LOW_PRIORITY_INTERVAL,
     DEFAULT_ROUTE_RULES,
     MessageQuota,
     RateLimitBudget,
     RateLimiter,
+    RequestPriority,
     RouteRule,
     build_limiter,
     match_route,
@@ -110,6 +112,7 @@ __all__ = (
     "DataUrl",
     "DEFAULT_BUDGETS",
     "DEFAULT_IMAGE_SIZE",
+    "DEFAULT_LOW_PRIORITY_INTERVAL",
     "DEFAULT_ROUTE_RULES",
     "CHUNKED_MEDIA_MAX_SIZE",
     "ChunkedMediaUploader",
@@ -147,6 +150,7 @@ __all__ = (
     "RateLimitBudget",
     "RateLimitError",
     "RateLimiter",
+    "RequestPriority",
     "RawEvent",
     "ReconnectPolicy",
     "RouteRule",

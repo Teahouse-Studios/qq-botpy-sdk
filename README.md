@@ -229,6 +229,16 @@ QQ 开放平台为每个 REST 接口声明了 `接口频率限制`，消息类�
 被动回复（带 `msg_id`/`event_id`）只受接口级与「始终生效」配额约束，不会消耗主动消息额度。
 媒体预签名地址等非 `base_url` 主机上的传输不计入接口配额。
 
+**对话消息优先**：同一通道内的等待队列按优先级排序，被动回复（用户正在等响应）插到队头，
+主动/批量推送排在其后，避免一批推送把队列占满导致对话消息饿死。优先级只决定谁先拿到下一个
+令牌，不改变整体吞吐；连续放行 4 个高优先级请求后会强制放行一个等待最久的批量请求，防止低
+优先级被反向饿死（`rate_limit={"low_priority_interval": ...}`，`None` 关闭）。
+
+并发槽位（`max_concurrency`）在取令牌**之前**获取，令牌紧挨着真正发送才被消耗，否则等待
+槽位期间堆积的令牌会在槽位释放后成串发出、绕过速率约束。`max_buckets` 超出后只回收「令牌桶
+已补满且惩罚已结束」的空闲通道；所有通道都还有未恢复状态时允许超过该上限，以免回收把已消耗
+的平台配额静默清零。
+
 ```python
 # 默认：启用整流，按文档限制排队
 client = MyClient(intents=intents)
@@ -246,7 +256,7 @@ client = MyClient(intents=intents, rate_limit={"max_concurrency": 8})
 client = MyClient(intents=intents, rate_limit=False)
 
 # 完全自定义：注入自己的 RateLimiter
-from botpy.protocol import RateLimitBudget, RateLimiter, RouteRule
+from botpy.protocol import RateLimitBudget, RateLimiter, RequestPriority, RouteRule
 
 limiter = RateLimiter(
     route_rules={"POST /v2/groups/{}/messages": RouteRule((RateLimitBudget(20, 60.0),))},
@@ -256,7 +266,7 @@ client = MyClient(intents=intents, rate_limit=limiter)
 
 `RateLimiter` 可调参数：`certification`（`"certified"` 默认 / `"unverified"`）、`max_concurrency`、
 `route_rules`、`default_budgets`（未匹配接口的兜底配额，默认 50 QPS）、`max_buckets`、
-`default_penalty`、`max_pacing_window`。
+`default_penalty`、`max_pacing_window`、`low_priority_interval`。
 
 窗口长于 `max_pacing_window`（默认 3600 秒）的配额属于「每日额度」：用尽时 SDK 记录一条 warning
 并仍然发送，由平台返回结构化错误，而不会让消息挂起数小时。可用 `limiter.snapshot()` 查看各通道
@@ -271,13 +281,17 @@ client = MyClient(intents=intents, rate_limit=limiter)
 | --- | --- |
 | `msg_id`/`event_id` 失效（`40034005`、`40034128`、`304103` 等） | 去掉被动回复上下文，回退为主动消息重发一次 |
 | 消息被去重（`40054005`） | 首次发送换一个新 `msg_seq` 重发一次；仍失败直接抛错 |
-| 网络超时 / 连接中断 | 按 `3 × 2ⁿ` 秒（3、6、12、24……）指数退避重发 |
+| 网络超时 / 连接中断 | 按 `3 × 2ⁿ` 秒（3、6、12、24……）指数退避重发；主动消息只重发"确定没发出"的失败 |
 | 已知不可达（`40034101`、`40054002`、`40054003` 等） | 立即抛出 `ApiError`，不重试 |
 | 其它未收录错误码 | 同样立即抛出，绝不重复投递 |
 
 单次逻辑发送的总时长上限为 60 秒，超时抛出 `MessageSendTimeoutError`（`TransportError`
 子类，带 `attempts` / `elapsed` / `timeout`）。重发过程中再次遇到 `40054005` 会立即停止：
 此时消息可能已经发出但 id 不可知。
+
+网络失败区分「请求确定没有发出」和「已发出但结果未知」：前者任何消息都重发（不可能重复
+投递），后者只有被动回复重发——主动消息没有去重保护，默认不重发以免用户收到两条。
+需要旧行为时用 `MessageSendPolicy(replay_ambiguous_proactive=True)`。
 
 ```python
 from botpy.protocol import MessageSendPolicy

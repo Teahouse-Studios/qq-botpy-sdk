@@ -181,6 +181,7 @@ class BotHttp:
         retry_unsafe = kwargs.pop("retry_unsafe", False)
         retry_ambiguous = kwargs.pop("retry_ambiguous", False)
         before_attempt: Optional[Callable[[], Awaitable[None]]] = kwargs.pop("before_attempt", None)
+        priority: Optional[int] = kwargs.pop("priority", None)
         if kwargs:
             raise TypeError("不支持的 HTTP 请求参数: %s" % ", ".join(sorted(kwargs)))
 
@@ -198,6 +199,7 @@ class BotHttp:
                 timeout=timeout,
                 before_attempt=before_attempt,
                 route_template=route.path,
+                priority=priority,
             )
         except ApiError as error:
             exception_type = HttpErrorDict.get(error.status, ServerError)
