@@ -1860,6 +1860,126 @@ class BotAPI:
         route = Route("GET", "/v2/groups/{group_openid}/bot_state", group_openid=group_openid)
         return await self._http.request(route)
 
+    # 群成员管理
+    async def get_group_members(
+        self,
+        group_openid: str,
+        *,
+        cursor: Optional[str] = None,
+    ) -> group.GroupMemberList:
+        """分页获取群成员列表，单页最多返回 30 位成员。
+
+        该接口目前为内邀能力，仅对白名单机器人开放；无权限时平台返回 ``11253``。
+        """
+
+        if cursor is not None and not isinstance(cursor, str):
+            raise TypeError("cursor must be a string or None")
+        params = {"cursor": cursor} if cursor is not None else None
+        route = Route("GET", "/v2/groups/{group_openid}/members", group_openid=group_openid)
+        return await self._http.request(route, params=params)
+
+    async def get_group_member(self, group_openid: str, member_openid: str) -> group.GroupMember:
+        """获取指定群成员的详细信息。该接口可能需要平台白名单权限。"""
+
+        _required_text(member_openid, "member_openid")
+        route = Route(
+            "GET",
+            "/v2/groups/{group_openid}/members/{member_openid}",
+            group_openid=group_openid,
+            member_openid=member_openid,
+        )
+        return await self._http.request(route)
+
+    async def batch_remove_group_members(
+        self,
+        group_openid: str,
+        member_openids: Sequence[str],
+        *,
+        add_to_member_blacklist: bool = False,
+    ) -> group.BatchRemoveMembersResult:
+        """批量移除群成员，单次最多 20 人，可选择同时加入群黑名单。"""
+
+        members = _openid_list(member_openids, "member_openids")
+        if not isinstance(add_to_member_blacklist, bool):
+            raise TypeError("add_to_member_blacklist must be a bool")
+        payload = {
+            "member_openids": members,
+            "add_to_member_blacklist": add_to_member_blacklist,
+        }
+        route = Route(
+            "POST",
+            "/v2/groups/{group_openid}/batch_remove_members",
+            group_openid=group_openid,
+        )
+        return await self._http.request(route, json=payload)
+
+    async def get_group_member_blacklist(
+        self,
+        group_openid: str,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 20,
+    ) -> group.GroupBlacklist:
+        """分页查询群黑名单列表，``limit`` 默认 20、最大 100。"""
+
+        _validate_page_limit(limit)
+        if cursor is not None and not isinstance(cursor, str):
+            raise TypeError("cursor must be a string or None")
+        params: Dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        route = Route("GET", "/v2/groups/{group_openid}/member_blacklist", group_openid=group_openid)
+        return await self._http.request(route, params=params)
+
+    async def update_group_member_blacklist(
+        self,
+        group_openid: str,
+        *,
+        op: str,
+        member_openids: Sequence[str],
+    ) -> group.GroupBlacklistResult:
+        """批量将用户加入或移出群黑名单，``op`` 为 ``add`` 或 ``del``，单次最多 20 人。
+
+        只有目标用户不在群中时才能加入群黑名单。
+        """
+
+        if op not in {"add", "del"}:
+            raise ValueError("op must be 'add' or 'del'")
+        members = _openid_list(member_openids, "member_openids")
+        payload = {"op": op, "member_openids": members}
+        route = Route(
+            "POST",
+            "/v2/groups/{group_openid}/member_blacklist",
+            group_openid=group_openid,
+        )
+        return await self._http.request(route, json=payload)
+
+    async def add_group_member_blacklist(
+        self,
+        group_openid: str,
+        member_openids: Sequence[str],
+    ) -> group.GroupBlacklistResult:
+        """将用户加入群黑名单。"""
+
+        return await self.update_group_member_blacklist(
+            group_openid,
+            op="add",
+            member_openids=member_openids,
+        )
+
+    async def remove_group_member_blacklist(
+        self,
+        group_openid: str,
+        member_openids: Sequence[str],
+    ) -> group.GroupBlacklistResult:
+        """将用户移出群黑名单。"""
+
+        return await self.update_group_member_blacklist(
+            group_openid,
+            op="del",
+            member_openids=member_openids,
+        )
+
     async def get_group_join_requests(
         self,
         group_openid: str,

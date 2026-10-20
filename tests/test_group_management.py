@@ -37,6 +37,85 @@ class GroupManagementApiTests(unittest.IsolatedAsyncioTestCase):
         await self.api.get_group_bot_state("group")
         self.assert_last_call("GET", "/v2/groups/group/bot_state")
 
+    async def test_group_member_list_and_detail_routes(self):
+        await self.api.get_group_members("group")
+        route, kwargs = self.http.calls[-1]
+        self.assertEqual("GET", route.method)
+        self.assertEqual("/v2/groups/group/members", route.path.format_map(route.parameters))
+        self.assertIsNone(kwargs.get("params"))
+
+        await self.api.get_group_members("group", cursor="next")
+        self.assert_last_call(
+            "GET",
+            "/v2/groups/group/members",
+            params={"cursor": "next"},
+        )
+
+        await self.api.get_group_member("group", "member")
+        self.assert_last_call("GET", "/v2/groups/group/members/member")
+
+    async def test_batch_remove_group_members_payload(self):
+        await self.api.batch_remove_group_members("group", ["member-a", "member-b"])
+        self.assert_last_call(
+            "POST",
+            "/v2/groups/group/batch_remove_members",
+            json={
+                "member_openids": ["member-a", "member-b"],
+                "add_to_member_blacklist": False,
+            },
+        )
+
+        await self.api.batch_remove_group_members(
+            "group",
+            ["member-a"],
+            add_to_member_blacklist=True,
+        )
+        self.assert_last_call(
+            "POST",
+            "/v2/groups/group/batch_remove_members",
+            json={"member_openids": ["member-a"], "add_to_member_blacklist": True},
+        )
+
+    async def test_group_member_blacklist_routes(self):
+        await self.api.get_group_member_blacklist("group")
+        self.assert_last_call(
+            "GET",
+            "/v2/groups/group/member_blacklist",
+            params={"limit": 20},
+        )
+
+        await self.api.get_group_member_blacklist("group", cursor="next", limit=100)
+        self.assert_last_call(
+            "GET",
+            "/v2/groups/group/member_blacklist",
+            params={"limit": 100, "cursor": "next"},
+        )
+
+        await self.api.add_group_member_blacklist("group", ["member-a", "member-b"])
+        self.assert_last_call(
+            "POST",
+            "/v2/groups/group/member_blacklist",
+            json={"op": "add", "member_openids": ["member-a", "member-b"]},
+        )
+
+        await self.api.remove_group_member_blacklist("group", ["member-a"])
+        self.assert_last_call(
+            "POST",
+            "/v2/groups/group/member_blacklist",
+            json={"op": "del", "member_openids": ["member-a"]},
+        )
+
+        await self.api.update_group_member_blacklist(
+            "group",
+            op="add",
+            member_openids=["member-c"],
+        )
+        self.assert_last_call(
+            "POST",
+            "/v2/groups/group/member_blacklist",
+            json={"op": "add", "member_openids": ["member-c"]},
+        )
+
     async def test_group_join_request_list_uses_query_parameters(self):
         await self.api.get_group_join_requests("group", cursor="next", limit=50)
 
@@ -173,6 +252,44 @@ class GroupManagementApiTests(unittest.IsolatedAsyncioTestCase):
                 op="replace",
                 whitelist_users=["1234567"],
             )
+
+    async def test_group_member_api_validation_rejects_invalid_payloads(self):
+        with self.assertRaises(TypeError):
+            await self.api.get_group_members("group", cursor=1)
+        with self.assertRaises(ValueError):
+            await self.api.get_group_member("group", "")
+        with self.assertRaises(ValueError):
+            await self.api.batch_remove_group_members("group", [])
+        with self.assertRaises(ValueError):
+            await self.api.batch_remove_group_members("group", ["member"] * 21)
+        with self.assertRaises(ValueError):
+            await self.api.batch_remove_group_members("group", [""])
+        with self.assertRaises(TypeError):
+            await self.api.batch_remove_group_members("group", "member")
+        with self.assertRaises(TypeError):
+            await self.api.batch_remove_group_members(
+                "group",
+                ["member"],
+                add_to_member_blacklist="yes",
+            )
+        with self.assertRaises(ValueError):
+            await self.api.update_group_member_blacklist(
+                "group",
+                op="replace",
+                member_openids=["member"],
+            )
+        with self.assertRaises(ValueError):
+            await self.api.update_group_member_blacklist(
+                "group",
+                op="add",
+                member_openids=[],
+            )
+        with self.assertRaises(ValueError):
+            await self.api.get_group_member_blacklist("group", limit=101)
+        with self.assertRaises(TypeError):
+            await self.api.get_group_member_blacklist("group", limit=True)
+        with self.assertRaises(TypeError):
+            await self.api.get_group_member_blacklist("group", cursor=123)
 
 
 class GroupManagementEventTests(unittest.TestCase):

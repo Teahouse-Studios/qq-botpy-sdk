@@ -23,6 +23,42 @@ class GroupBotState(TypedDict):
     member_role: GroupMemberRole
 
 
+class GroupMember(TypedDict):
+    member_openid: str
+    username: str
+    member_role: GroupMemberRole
+    bot: bool
+    joined_at: str
+    union_openid: str
+
+
+class GroupMemberList(TypedDict):
+    members: List[GroupMember]
+    next_cursor: str
+
+
+class BlacklistUser(TypedDict):
+    union_openid: str
+    member_openid: str
+    username: str
+    banned_at: str
+    bot: bool
+
+
+class GroupBlacklist(TypedDict):
+    users: List[BlacklistUser]
+    next_cursor: str
+
+
+class GroupBlacklistResult(TypedDict):
+    fail_openids: List[str]
+
+
+class BatchRemoveMembersResult(TypedDict):
+    remove_members_result: str
+    add_to_member_blacklist_fail_openids: List[str]
+
+
 class ReviewQA(TypedDict):
     question: str
     answer: str

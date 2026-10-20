@@ -108,12 +108,15 @@ HTTP 请求尚未发出。
 ```python
 info = await client.api.get_group_info(group_openid)
 bot_state = await client.api.get_group_bot_state(group_openid)
+members = await client.api.get_group_members(group_openid)
+member = await client.api.get_group_member(group_openid, member_openid)
+blacklist = await client.api.get_group_member_blacklist(group_openid)
 requests = await client.api.get_group_join_requests(group_openid, limit=20)
 mute_setting = await client.api.get_group_mute_setting(group_openid)
 strategies = await client.api.get_group_join_approval_strategies(limit=20)
 ```
 
-群信息、入群申请审批、成员禁言、自动审批策略和新增群事件的完整说明见
+群信息、群成员管理、入群申请审批、成员禁言、自动审批策略和新增群事件的完整说明见
 [群管理 API 与事件](./GROUP_MANAGEMENT.md)。
 
 ## 自定义菜单与指令面板

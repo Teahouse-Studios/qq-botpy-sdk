@@ -1,7 +1,7 @@
 # 群管理 API 与事件
 
 这些接口使用群 OpenID，并要求机器人具备对应的群权限。入群申请、禁言和自动审批策略通常要求机器人是群管理员；
-群基本信息和机器人群内状态接口还可能需要平台白名单权限。
+群基本信息、机器人群内状态和群成员管理接口还可能需要平台白名单权限（无权限时平台返回 `11253`）。
 
 ## API 列表
 
@@ -9,6 +9,13 @@
 | --- | --- |
 | `get_group_info()` | 获取群基本信息 |
 | `get_group_bot_state()` | 获取机器人群内状态 |
+| `get_group_members()` | 分页获取群成员列表 |
+| `get_group_member()` | 获取群成员信息 |
+| `batch_remove_group_members()` | 批量移除群成员，可同时拉黑 |
+| `get_group_member_blacklist()` | 分页查询群黑名单 |
+| `update_group_member_blacklist()` | 批量加入或移出群黑名单 |
+| `add_group_member_blacklist()` | 加入群黑名单的便捷方法 |
+| `remove_group_member_blacklist()` | 移出群黑名单的便捷方法 |
 | `get_group_join_requests()` | 分页拉取入群申请 |
 | `approve_group_join_request()` | 通过入群申请 |
 | `decline_group_join_request()` | 拒绝入群申请，可同时拉黑 |
@@ -36,6 +43,54 @@ print(state["member_openid"], state["joined_at"], state["member_role"])
 或 `mention_and_context`；`member_role` 可能为 `member`、`owner` 或 `admin`。
 
 这两个接口的频率限制均为 30 QPM，且仅对具备白名单权限的机器人开放。无权限时平台可能返回错误码 `11253`。
+
+## 群成员管理
+
+群成员管理接口目前为内邀能力，仅对白名单机器人开放。成员列表单页最多返回 30 人；
+群黑名单单页默认 20 人、最大 100 人。分页游标为 `next_cursor`，空串表示已到末页。
+
+```python
+result = await client.api.get_group_members(group_openid)
+for member in result["members"]:
+    print(member["member_openid"], member["username"], member["member_role"])
+
+while result["next_cursor"]:
+    result = await client.api.get_group_members(group_openid, cursor=result["next_cursor"])
+
+member = await client.api.get_group_member(group_openid, member_openid)
+print(member["joined_at"], member["union_openid"])
+```
+
+批量移除成员（单次最多 20 人），可选择同时加入群黑名单：
+
+```python
+result = await client.api.batch_remove_group_members(
+    group_openid,
+    [member_openid],
+    add_to_member_blacklist=True,
+)
+print(result["remove_members_result"], result["add_to_member_blacklist_fail_openids"])
+```
+
+查询并操作群黑名单（单次最多 20 人）。只有目标用户不在群中时才能加入群黑名单：
+
+```python
+blacklist = await client.api.get_group_member_blacklist(group_openid, limit=50)
+for user in blacklist["users"]:
+    print(user["member_openid"], user["banned_at"])
+
+await client.api.add_group_member_blacklist(group_openid, [member_openid])
+await client.api.remove_group_member_blacklist(group_openid, [member_openid])
+
+# 等价的通用写法：
+await client.api.update_group_member_blacklist(
+    group_openid,
+    op="del",
+    member_openids=[member_openid],
+)
+```
+
+加入或移出失败的 OpenID 会出现在响应的 `fail_openids` 列表中。
 
 ## 入群申请
 

@@ -450,7 +450,7 @@ client = MyClient(
 | --- | --- |
 | [API 参考](./docs/API.md) | 新高层接口、统一发送、媒体、REST 和 Interaction |
 | [自定义菜单与指令面板](./docs/MENU_PANEL.md) | 声明式 Menu/Panel、启动同步和多副本部署风险 |
-| [群管理 API 与事件](./docs/GROUP_MANAGEMENT.md) | 群信息、入群审批、成员禁言、自动审批策略和群成员事件 |
+| [群管理 API 与事件](./docs/GROUP_MANAGEMENT.md) | 群信息、群成员管理、入群审批、成员禁言、自动审批策略和群成员事件 |
 | [请求整流与接口限速](./docs/RATE_LIMITS.md) | 通道划分、文档核对后的接口配额表和整流配置 |
 | [消息发送失败处理](./docs/SEND_ERRORS.md) | `err_code` 分类、回退主动消息、换 seq 与指数退避规则 |
 | [迁移指南](./MIGRATION.md) | 协议层改造后的行为变化与不兼容项 |
