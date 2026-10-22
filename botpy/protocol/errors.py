@@ -22,6 +22,22 @@ def extract_error_code(payload: Any) -> Optional[int]:
     return None
 
 
+def extract_exception_error_code(exc: BaseException) -> Optional[int]:
+    """从异常对象上取出平台错误码。
+
+    新版异常把错误码放在 ``code`` 上，个别旧异常只保留原始响应体；两种都看。
+    """
+
+    code = getattr(exc, "code", None)
+    if isinstance(code, bool):
+        code = None
+    if isinstance(code, int):
+        return code
+    if isinstance(code, str) and code.lstrip("-").isdigit():
+        return int(code)
+    return extract_error_code(getattr(exc, "response", None))
+
+
 class BotPyError(RuntimeError):
     """所有新版 botpy 异常的基类。"""
 
@@ -140,3 +156,24 @@ class UploadDailyLimitExceededError(BotPyError):
         super().__init__(message)
         self.file_path = file_path
         self.file_size = file_size
+
+
+class MediaImageQuotaExceededError(BotPyError):
+    """素材图片数量超过平台上限，且自动释放没能腾出空间。
+
+    ``total`` 是清理前查询到的有效图片总数；``deleted`` 是本次清理实际删掉的数量；
+    ``max_rounds`` 是策略里配置的最大释放轮数（用于定位是策略太保守还是确实删不动）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        total: Optional[int] = None,
+        deleted: int = 0,
+        max_rounds: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.total = total
+        self.deleted = deleted
+        self.max_rounds = max_rounds

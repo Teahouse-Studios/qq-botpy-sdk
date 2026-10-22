@@ -13,6 +13,12 @@ MEDIA_IMAGE_MAX_SIZE = 10 * 1024 * 1024
 MEDIA_IMAGE_MAX_COUNT = 100
 """单个机器人可保存的有效素材图片数量上限。"""
 
+MEDIA_IMAGE_QUOTA_EXCEEDED_CODE = 40035007
+"""素材图片数量超过上限（100 张）时平台返回的 err_code。"""
+
+MEDIA_IMAGE_NOT_FOUND_CODE = 40035008
+"""删除或查询的图片不存在时平台返回的 err_code（并发删除时可直接忽略）。"""
+
 MEDIA_IMAGE_EXTENSIONS = {
     ".png": "image/png",
     ".jpg": "image/jpeg",

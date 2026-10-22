@@ -298,6 +298,26 @@ class UniversalMessageTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await Client.send_wakeup(dummy, ReplyTarget(scope="group", target_id="group"), "no")
 
+    async def test_send_markdown_forwards_force_verify_image_resource(self):
+        dummy = make_client()
+        target = ReplyTarget(scope="group", target_id="group")
+
+        await Client.send_markdown(dummy, target, "# verify", force_verify_image_resource=True)
+        await Client.send_markdown(dummy, target, "# default")
+        await Client.send_markdown(dummy, target, "# off", force_verify_image_resource=False)
+
+        self.assertEqual(
+            {"content": "# verify", "force_verify_image_resource": True},
+            dummy.api.calls[0][2]["markdown"],
+        )
+        self.assertEqual({"content": "# default"}, dummy.api.calls[1][2]["markdown"])
+        self.assertEqual(
+            {"content": "# off", "force_verify_image_resource": False},
+            dummy.api.calls[2][2]["markdown"],
+        )
+        with self.assertRaises(TypeError):
+            await Client.send_markdown(dummy, target, "# bad", force_verify_image_resource="yes")
+
     async def test_recall_routes_confirmed_scopes_and_rejects_dm(self):
         dummy = make_client()
 

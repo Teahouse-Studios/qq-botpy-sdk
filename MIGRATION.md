@@ -115,5 +115,16 @@
   `delete_media_image()`，以及底层的 `post_media_image_prepare()`、`put_media_image()`、
   `post_media_image_complete()`。素材图片走 `/v2/media-images` 三步协议换取 `qqbot-media://` 引用，
   与富媒体消息的 `file_info` 上传互不替代。
+- 素材图片数量触顶（`err_code=40035007`）时默认自动释放：先翻分页取最后一页（最旧的一批），整页删除后
+  重试上传，删掉的 `image_id` 记在 `MediaImageUploadResult.released_images`。策略由
+  `MediaImageQuotaPolicy`（`enabled` / `max_rounds` / `delete_per_round` / `protect`）控制，可通过
+  `Client(media_image_quota_policy=...)` 或单次 `quota_policy=` 覆盖；释放到上限仍失败抛
+  `MediaImageQuotaExceededError`。
+- 素材图片列表改为本地镜像 `MediaImageRegistry`：登录成功后后台自动同步一次（也可 `await
+  client.sync_media_images()` 手动触发），上传插队首、释放从队尾弹出，删除不再每次翻分页。
+  每次上传成功会派发后台任务检查容量，默认 80% 水位（100 张里的 80 张）时删除最旧一张；所有删除在
+  同一把异步锁内串行，避免并发任务取到同一张图片。策略由 `MediaImageCapacityPolicy`
+  （`enabled` / `high_watermark` / `max_count` / `protect`）控制，可通过
+  `Client(media_image_capacity_policy=...)` 或单次 `capacity_policy=` 覆盖。
 
 完整签名和示例见 [docs/API.md](./docs/API.md)。

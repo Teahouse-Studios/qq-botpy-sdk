@@ -51,10 +51,13 @@ HTTP 请求发出前抛出 `TransportError`；重试等待超时则保留此前�
 
 - `await client.send(target, content=..., msg_type=..., markdown=..., media=..., extra=...)`
 - `await client.send_text(target, content)`
-- `await client.send_markdown(target, content, keyboard=None)`
+- `await client.send_markdown(target, content, keyboard=None, force_verify_image_resource=None)`
 - `await client.send_text_with_keyboard(target, content, keyboard)`
 - `await client.send_wakeup(target, content)`
 - `await client.recall_message(target, message_id)`
+
+`send_markdown()` 的 `force_verify_image_resource=True` 会让平台校验 Markdown 内图片的转存结果：
+转存失败时消息不会发出，直接返回错误。省略时不下发该字段，保持平台默认的 `False` 行为。
 
 `send_text()` 自动切分超过 5000 字符的文本。单段返回一个平台响应，多段返回响应列表。C2C 和群聊携带
 `message_id` 时会执行被动回复限制；超限后自动转主动发送。常规消息 POST 中，仅这类带 `msg_id` 的
@@ -113,13 +116,76 @@ await client.delete_media_image(uploaded.image_id)
 ```
 
 `upload_media_image()` 返回 `MediaImageUploadResult`，字段为 `image_id`、`url`、`ttl`、`preview_url`、
-`upload_id`、`file_name`、`content_type`、`size` 和 `markdown`。它内部依次调用
+`upload_id`、`file_name`、`content_type`、`size`、`markdown` 和 `released_images`。它内部依次调用
 `post_media_image_prepare()` → `put_media_image()` → `post_media_image_complete()`，三步也可以直接通过
 `client.api` 手动执行。
+
+### 数量超限自动释放
+
+单机器人默认最多保留 100 张有效图片，触顶时 prepare/complete 返回 `40035007`。SDK 默认开启自动释放：
+翻完分页找到**最后一页**（最旧的一批），整页删除后再重新上传，删掉的 `image_id` 记在
+`result.released_images` 里。
+
+```python
+from botpy.protocol import MediaImageQuotaPolicy
+
+# 默认策略：最多释放 3 轮，每轮删掉最旧的一整页
+uploaded = await client.upload_media_image(local_path="cake.png")
+print(uploaded.released_images)
+
+# 保守策略：每轮只删 5 张，并保护仍在用的图片
+policy = MediaImageQuotaPolicy(max_rounds=2, delete_per_round=5, protect=("102083127_3f9a",))
+await client.send_markdown_image(target, local_path="cake.png", quota_policy=policy)
+
+# 关掉自动释放，超限时直接抛 MediaImageQuotaExceededError
+await client.upload_media_image(local_path="cake.png", quota_policy=MediaImageQuotaPolicy(enabled=False))
+```
+
+`Client(media_image_quota_policy=...)` 可以设置全局默认策略。释放到上限仍失败、或最旧一页已无可删图片时，
+抛 `MediaImageQuotaExceededError`，异常上带 `total`、`deleted` 与 `max_rounds`。
 
 约束：仅支持 `png` / `jpeg` / `gif` / `webp`，扩展名必须与 `content_type` 一致，单张不超过 10 MB，单个机器人
 最多保留 100 张有效图片。上传只接受 `bytes` 或本地文件，不支持 `url` 源——平台要求 prepare 阶段提交
 `md5` 与 `sha1`，远程 URL 无法在本地计算摘要。`preview_url` 是短时效外链，不要持久化。
+
+### 本地列表镜像与容量水位
+
+SDK 会在本地维护一份远端素材列表的镜像（`MediaImageRegistry`），不用每次都翻分页：
+
+- 登录成功后自动在后台同步一次（`Client._bot_login()` → `schedule_sync()`）；也可以随时手动
+  `await client.sync_media_images()` 强制全量同步。
+- 上传成功后新图片直接插到镜像队首，删除时从队尾（最旧）弹出；`client.delete_media_image()` 也会同步更新镜像。
+- 每次上传成功后会派发一个**后台任务**检查容量，达到水位（默认 80%，即 100 张里的 80 张）就删除队尾最旧的一张。
+
+因为后台任务执行顺序不确定，所有「弹出队尾 → 调删除接口」都在一把异步锁内完成，保证弹出严格按顺序、不会
+两个任务同时指向同一张图片。删除成功后该 `image_id` 会记进删除记录，之后即使远端列表快照还是旧数据
+（最终一致），同步时也会把它过滤掉，不会「复活」。
+
+`client.delete_media_image(image_id)` 手动删除同样走这把锁并更新镜像；删除返回 `40035008`（图片不存在）
+按已删除处理，容量检查会继续弹下一张直到删成功或无可删。
+
+```python
+from botpy.protocol import MediaImageCapacityPolicy
+
+# 默认：100 张上限、80% 水位、每次删最旧一张
+await client.sync_media_images()          # 手动同步一次远端列表
+print(client.media_image_registry.entries)   # image_id 元组，最新在前
+
+# 自定义：上限按实际配额调整，水位 90%
+policy = MediaImageCapacityPolicy(high_watermark=0.9, max_count=100)
+client = Client(appid="...", secret="...", media_image_capacity_policy=policy)
+
+# 关闭后台容量检查
+await client.upload_media_image(
+    local_path="cake.png",
+    capacity_policy=MediaImageCapacityPolicy(enabled=False),
+)
+```
+
+`MediaImageCapacityPolicy` 字段：`enabled`（默认 `True`）、`high_watermark`（默认 `0.8`，取值 `(0, 1]`）、
+`max_count`（默认 `100`）、`protect`（永不删除的 `image_id`）。`Client(media_image_capacity_policy=...)` 设置全局
+默认策略，单次调用可用 `capacity_policy=` 覆盖。后台任务的异常只记 warning，不影响上传结果；`client.close()`
+会取消仍在运行的后台任务。
 
 ## 通用 REST API
 

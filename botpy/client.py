@@ -23,7 +23,13 @@ from .protocol.events import normalize_inbound_message
 from .protocol.constants import DEFAULT_API_BASE_URL
 from .protocol.errors import TransportError
 from .protocol.media import ChunkedMediaUploader, ProgressCallback
-from .protocol.media_image import MediaImageUploader, MediaImageUploadResult
+from .protocol.media_image import (
+    MediaImageCapacityPolicy,
+    MediaImageQuotaPolicy,
+    MediaImageRegistry,
+    MediaImageUploader,
+    MediaImageUploadResult,
+)
 from .protocol.message import (
     LARGE_MEDIA_THRESHOLD,
     MAX_MEDIA_UPLOAD_SIZE,
@@ -118,6 +124,8 @@ class Client:
         gateway_send_timeout: Optional[float] = 30.0,
         proxy: Optional[ProxyConfig] = None,
         rate_limit: Union[bool, "RateLimiter", Mapping[str, Any], None] = None,
+        media_image_quota_policy: Optional[MediaImageQuotaPolicy] = None,
+        media_image_capacity_policy: Optional[MediaImageCapacityPolicy] = None,
     ):
         """
         Args:
@@ -155,6 +163,11 @@ class Client:
           rate_limit: 出站请求整流配置。默认启用，按官方文档核对后的接口频率限制
             排队限速；``False`` 关闭整流，也可以传入
             :class:`botpy.protocol.RateLimiter` 或参数字典自定义。
+          media_image_quota_policy: 素材图片数量超限时的自动释放策略；默认整页删除
+            最旧的一批图片后重传，传 ``MediaImageQuotaPolicy(enabled=False)`` 关闭。
+          media_image_capacity_policy: 上传后的容量水位策略；默认每张图片上传成功后
+            派发后台任务检查一次，达到 80% 时删除末尾（最旧）的一张图片。
+            传 ``MediaImageCapacityPolicy(enabled=False)`` 关闭。
         """
         self.intents: int = intents.value
         self.ret_coro: bool = False
@@ -186,6 +199,15 @@ class Client:
                 raise ValueError("gateway_send_timeout must be a non-negative finite number or None")
         self._markdown_support = markdown_support
         self._gateway_send_timeout = gateway_timeout_value
+        if media_image_quota_policy is not None and not isinstance(media_image_quota_policy, MediaImageQuotaPolicy):
+            raise TypeError("media_image_quota_policy must be a MediaImageQuotaPolicy or None")
+        self._media_image_quota_policy = media_image_quota_policy or MediaImageQuotaPolicy()
+        if media_image_capacity_policy is not None and not isinstance(
+            media_image_capacity_policy, MediaImageCapacityPolicy
+        ):
+            raise TypeError("media_image_capacity_policy must be a MediaImageCapacityPolicy or None")
+        self._media_image_capacity_policy = media_image_capacity_policy or MediaImageCapacityPolicy()
+        self._media_image_registry: Optional[MediaImageRegistry] = None
         self._token_base_url = token_base_url
         self._user_agent = user_agent
         self._ssl = ssl
@@ -492,14 +514,26 @@ class Client:
         target: ReplyTarget,
         content: str,
         keyboard: Optional[Mapping[str, Any]] = None,
+        *,
+        force_verify_image_resource: Optional[bool] = None,
     ):
-        """发送原生 Markdown，可选附带内联键盘。"""
+        """发送原生 Markdown，可选附带内联键盘。
+
+        ``force_verify_image_resource`` 为 ``True`` 时平台会校验 Markdown 内的图片转存结果，
+        转存失败则直接返回错误、不发送消息；默认 ``False``（保持原有行为）。
+        """
+
+        markdown: MutableMapping[str, Any] = {"content": content}
+        if force_verify_image_resource is not None:
+            if not isinstance(force_verify_image_resource, bool):
+                raise TypeError("force_verify_image_resource must be a bool")
+            markdown["force_verify_image_resource"] = force_verify_image_resource
 
         return await Client.send(
             self,
             target,
             msg_type=MessageType.MARKDOWN,
-            markdown={"content": content},
+            markdown=markdown,
             keyboard=keyboard,
         )
 
@@ -617,17 +651,35 @@ class Client:
         content_type: Optional[str] = None,
         alt: Optional[str] = None,
         timeout: float = 300,
+        quota_policy: Optional[MediaImageQuotaPolicy] = None,
+        capacity_policy: Optional[MediaImageCapacityPolicy] = None,
     ) -> MediaImageUploadResult:
         """上传素材图片并返回 ``qqbot-media://`` 引用。
 
         素材图片与富媒体消息的 ``file_info`` 不是同一套协议：这里只负责拿到引用，
         通过 ``result.markdown`` 或 :meth:`send_markdown` 把图片嵌进 Markdown 消息。
         ``data`` 与 ``local_path`` 必须二选一。
+
+        平台单机器人默认最多 100 张，触顶（``40035007``）时按
+        :class:`MediaImageQuotaPolicy` 从本地列表镜像的末尾（最旧）删图片再重传，
+        删掉的 ``image_id`` 记在 ``result.released_images`` 里。传
+        ``quota_policy=MediaImageQuotaPolicy(enabled=False)`` 可关闭自动释放。
+
+        每次上传成功都会按 :class:`MediaImageCapacityPolicy` 派发一个后台任务检查
+        容量，达到 80% 时删除列表末尾最旧的一张图片。
         """
 
         uploader = getattr(self, "_media_image_uploader", None)
         if uploader is None:
-            uploader = MediaImageUploader(self.api, logger=_log)
+            default_policy = getattr(self, "_media_image_quota_policy", None)
+            default_capacity = getattr(self, "_media_image_capacity_policy", None)
+            uploader = MediaImageUploader(
+                self.api,
+                logger=_log,
+                quota_policy=default_policy or MediaImageQuotaPolicy(),
+                capacity_policy=default_capacity or MediaImageCapacityPolicy(),
+                registry=self._media_image_registry_obj(),
+            )
             self._media_image_uploader = uploader
         return await uploader.upload(
             data=data,
@@ -636,17 +688,56 @@ class Client:
             content_type=content_type,
             alt=alt,
             timeout=timeout,
+            quota_policy=quota_policy,
+            capacity_policy=capacity_policy,
         )
 
+    def _schedule_media_image_sync(self) -> None:
+        """登录成功后派发一次后台任务，同步远端素材列表到本地镜像。"""
+
+        if getattr(self, "_closed", False) or getattr(self, "api", None) is None:
+            return
+        try:
+            self._media_image_registry_obj().schedule_sync()
+        except RuntimeError:
+            # 没有运行中的事件循环时不阻塞登录流程，首次上传前会懒同步。
+            _log.debug("[botpy] 素材图片列表未能立即同步，将在首次使用时懒同步")
+
+    def _media_image_registry_obj(self) -> MediaImageRegistry:
+        """返回本 client 共享的素材图片列表镜像（懒创建）。"""
+
+        registry = getattr(self, "_media_image_registry", None)
+        if registry is None:
+            registry = MediaImageRegistry(self.api, logger=_log)
+            self._media_image_registry = registry
+        return registry
+
+    @property
+    def media_image_registry(self) -> MediaImageRegistry:
+        """本地素材图片列表镜像（``entries`` 为 ``image_id``，最新在前）。"""
+
+        return self._media_image_registry_obj()
+
+    async def sync_media_images(self) -> Optional[int]:
+        """主动全量同步一次远端素材图片列表，返回同步后的有效图片总数。"""
+
+        registry = self._media_image_registry_obj()
+        uploader = getattr(self, "_media_image_uploader", None)
+        if uploader is not None and uploader.registry is not registry:
+            uploader.registry = registry
+        return await registry.sync()
+
     async def list_media_images(self, *, cursor: Optional[str] = None) -> Mapping[str, Any]:
-        """分页查询当前机器人的有效素材图片。"""
+        """分页查询当前机器人的有效素材图片（直连远端分页接口）。"""
 
         return await self.api.get_media_images(cursor=cursor)
 
     async def delete_media_image(self, image_id: str) -> Any:
-        """删除一张素材图片并释放配额。"""
+        """删除一张素材图片并释放配额（同步更新本地列表镜像）。"""
 
-        return await self.api.delete_media_image(image_id)
+        if not isinstance(image_id, str) or not image_id:
+            raise ValueError("image_id must be a non-empty string")
+        return await self._media_image_registry_obj().delete(image_id)
 
     async def send_markdown_image(
         self,
@@ -658,8 +749,15 @@ class Client:
         content_type: Optional[str] = None,
         alt: Optional[str] = None,
         keyboard: Optional[Mapping[str, Any]] = None,
+        force_verify_image_resource: Optional[bool] = None,
+        quota_policy: Optional[MediaImageQuotaPolicy] = None,
+        capacity_policy: Optional[MediaImageCapacityPolicy] = None,
     ):
-        """上传素材图片并把它作为 Markdown 图片消息发出去。"""
+        """上传素材图片并把它作为 Markdown 图片消息发出去。
+
+        ``force_verify_image_resource`` 语义与 :meth:`send_markdown` 相同；
+        ``quota_policy``、``capacity_policy`` 语义与 :meth:`upload_media_image` 相同。
+        """
 
         uploaded = await Client.upload_media_image(
             self,
@@ -668,8 +766,18 @@ class Client:
             file_name=file_name,
             content_type=content_type,
             alt=alt,
+            quota_policy=quota_policy,
+            capacity_policy=capacity_policy,
         )
-        return await Client.send_markdown(self, target, uploaded.markdown, keyboard=keyboard)
+        if force_verify_image_resource is None:
+            return await Client.send_markdown(self, target, uploaded.markdown, keyboard=keyboard)
+        return await Client.send_markdown(
+            self,
+            target,
+            uploaded.markdown,
+            keyboard=keyboard,
+            force_verify_image_resource=force_verify_image_resource,
+        )
 
     async def _upload_media(
         self,
@@ -1041,6 +1149,10 @@ class Client:
         if configuration is not None:
             await configuration.close()
 
+        registry = getattr(self, "_media_image_registry", None)
+        if registry is not None:
+            await registry.aclose()
+
         await self.http.close()
         upload_cache = getattr(self, "_upload_cache", None)
         if upload_cache is not None:
@@ -1164,6 +1276,7 @@ class Client:
         user = await self.http.login(token)
         self._robot = Robot(user)
         self._transport_state.robot = self._robot
+        self._schedule_media_image_sync()
 
         if self.configuration.enabled:
             try:

@@ -59,6 +59,8 @@ class MarkdownPayload(TypedDict, total=False):
     custom_template_id: str
     params: List[MessageMarkdownParams]
     content: str
+    # 是否校验 Markdown 图片转存结果；为 True 时转存失败会直接报错，默认 False
+    force_verify_image_resource: bool
 
 
 class KeyboardPayload(TypedDict, total=False):

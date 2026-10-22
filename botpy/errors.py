@@ -7,7 +7,14 @@
 
 from typing import Any, Optional
 
-from .protocol.errors import ApiError, BotPyError, RateLimitError, TransportError, UploadDailyLimitExceededError
+from .protocol.errors import (
+    ApiError,
+    BotPyError,
+    MediaImageQuotaExceededError,
+    RateLimitError,
+    TransportError,
+    UploadDailyLimitExceededError,
+)
 
 
 class _LegacyApiError(ApiError):
@@ -112,6 +119,7 @@ __all__ = (
     "ForbiddenError",
     "HttpErrorDict",
     "MethodNotAllowedError",
+    "MediaImageQuotaExceededError",
     "NotFoundError",
     "RateLimitError",
     "SequenceNumberError",

@@ -10,6 +10,7 @@ from .errors import (
     ApiError,
     AuthenticationError,
     BotPyError,
+    MediaImageQuotaExceededError,
     RateLimitError,
     TransportError,
     UploadDailyLimitExceededError,
@@ -28,6 +29,10 @@ from .image import (
 )
 from .media import ChunkedMediaUploader, ChunkedUploadProgress, ProgressCallback, UploadHashes
 from .media_image import (
+    MediaImageCapacityPolicy,
+    MediaImageQuotaPolicy,
+    MediaImageQuotaRelease,
+    MediaImageRegistry,
     MediaImageUploadApi,
     MediaImageUploader,
     MediaImageUploadResult,
@@ -144,6 +149,11 @@ __all__ = (
     "MAX_MEDIA_UPLOAD_SIZE",
     "MEDIA_FILE_SIZE_LIMITS",
     "MediaFileType",
+    "MediaImageCapacityPolicy",
+    "MediaImageQuotaExceededError",
+    "MediaImageQuotaPolicy",
+    "MediaImageQuotaRelease",
+    "MediaImageRegistry",
     "MediaImageUploadApi",
     "MediaImageUploader",
     "MediaImageUploadResult",
