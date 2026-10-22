@@ -27,6 +27,13 @@ from .image import (
     parse_image_size,
 )
 from .media import ChunkedMediaUploader, ChunkedUploadProgress, ProgressCallback, UploadHashes
+from .media_image import (
+    MediaImageUploadApi,
+    MediaImageUploader,
+    MediaImageUploadResult,
+    format_media_image_markdown,
+    guess_media_image_content_type,
+)
 from .message import (
     CHUNKED_MEDIA_MAX_SIZE,
     LARGE_MEDIA_THRESHOLD,
@@ -137,6 +144,9 @@ __all__ = (
     "MAX_MEDIA_UPLOAD_SIZE",
     "MEDIA_FILE_SIZE_LIMITS",
     "MediaFileType",
+    "MediaImageUploadApi",
+    "MediaImageUploader",
+    "MediaImageUploadResult",
     "MediaSendResult",
     "MediaUrlResult",
     "MessageQuota",
@@ -189,8 +199,10 @@ __all__ = (
     "format_duration",
     "format_error_message",
     "format_file_size",
+    "format_media_image_markdown",
     "format_qqbot_markdown_image",
     "get_image_size_from_data_url",
+    "guess_media_image_content_type",
     "guess_mime_type",
     "has_qqbot_image_size",
     "is_audio_file",

@@ -350,14 +350,16 @@ def _build_envelope(
                 sender = entry.sender_name or entry.sender_id
                 lines.append(f"{sender}: {entry.content[:200]}")
         if lines:
-            sections.append(f"<history>\n{'\n'.join(lines)}\n</history>")
+            history_text = "\n".join(lines)
+            sections.append(f"<history>\n{history_text}\n</history>")
 
     message_parts = []
     if context.message.content.strip():
         message_parts.append(context.message.content.strip())
     message_parts.extend(_attachment_label(attachment) for attachment in context.message.attachments)
     if message_parts:
-        sections.append(f"<message>\n{'\n'.join(message_parts)}\n</message>")
+        message_text = "\n".join(message_parts)
+        sections.append(f"<message>\n{message_text}\n</message>")
     return "\n\n".join(sections)
 
 

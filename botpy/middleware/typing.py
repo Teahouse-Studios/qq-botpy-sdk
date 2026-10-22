@@ -65,7 +65,7 @@ async def _keepalive_loop(
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
             return
-        except TimeoutError:
+        except asyncio.TimeoutError:
             await _safe_send(context, duration_seconds)
 
 

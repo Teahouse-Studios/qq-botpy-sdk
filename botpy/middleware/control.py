@@ -135,7 +135,7 @@ def concurrency_guard(
             if max_processing_seconds > 0:
                 try:
                     await asyncio.wait_for(next_call(), timeout=max_processing_seconds)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     context.abort("concurrency:processing-timeout")
             else:
                 await next_call()

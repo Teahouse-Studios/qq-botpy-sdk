@@ -25,7 +25,10 @@ from .types import (
     group,
     menu,
     panel,
+    media_image,
 )
+
+from .types.media_image import MEDIA_IMAGE_CONTENT_TYPES, MEDIA_IMAGE_MAX_SIZE
 
 
 def _bounded_list(value: Sequence[Any], name: str, maximum: int) -> List[Any]:
@@ -180,6 +183,21 @@ def _validate_panel(value: Mapping[str, Any]) -> Dict[str, Any]:
         normalized.append(item)
     result["items"] = normalized
     return result
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _validate_digest(value: Any, name: str, length: int) -> str:
+    if not isinstance(value, str) or len(value) != length or any(character not in _HEX_DIGITS for character in value):
+        raise ValueError(f"{name} must be a {length}-character hexadecimal string")
+    return value.lower()
+
+
+def _validate_media_image_content_type(content_type: Any) -> str:
+    if content_type not in MEDIA_IMAGE_CONTENT_TYPES:
+        raise ValueError("content_type must be 'image/png', 'image/jpeg', 'image/gif' or 'image/webp'")
+    return content_type
 
 
 def _validate_panel_scope(scope: str) -> str:
@@ -2575,3 +2593,103 @@ class BotAPI:
         if srv_send_msg:
             return await self._request_message(route, json=payload, timeout=120)
         return await self._http.request(route, json=payload, timeout=120)
+
+    async def post_media_image_prepare(
+        self,
+        *,
+        file_name: str,
+        file_size: int,
+        content_type: str,
+        md5: str,
+        sha1: str,
+    ) -> media_image.MediaImagePrepareResponse:
+        """申请一张素材图片的上传，返回预签名直传地址。
+
+        ``file_name`` 的扩展名必须与 ``content_type`` 一致；``md5`` 与 ``sha1``
+        为文件内容的十六进制摘要，平台用它们登记上传任务。
+        """
+
+        _required_text(file_name, "file_name")
+        if "." not in file_name:
+            raise ValueError("file_name must include an extension")
+        if isinstance(file_size, bool) or not isinstance(file_size, int) or file_size <= 0:
+            raise ValueError("file_size must be a positive integer")
+        if file_size > MEDIA_IMAGE_MAX_SIZE:
+            raise ValueError(f"file_size must not exceed {MEDIA_IMAGE_MAX_SIZE} bytes")
+        _validate_media_image_content_type(content_type)
+        _validate_digest(md5, "md5", 32)
+        _validate_digest(sha1, "sha1", 40)
+
+        payload = {
+            "file_name": file_name,
+            "file_size": file_size,
+            "content_type": content_type,
+            "md5": md5.lower(),
+            "sha1": sha1.lower(),
+        }
+        route = Route("POST", "/v2/media-images/prepare")
+        return await self._http.request(route, json=payload, timeout=120)
+
+    async def put_media_image(
+        self,
+        presigned_url: str,
+        data: bytes,
+        *,
+        content_type: str,
+        timeout: float = 300,
+    ):
+        """把图片二进制 PUT 到 ``prepare`` 返回的预签名地址。
+
+        ``Content-Type`` 必须与 prepare 声明值完全一致，否则 COS 会拒绝（403）。
+        """
+
+        _validate_https_url(presigned_url, "presigned_url")
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if not data:
+            raise ValueError("data must not be empty")
+        if len(data) > MEDIA_IMAGE_MAX_SIZE:
+            raise ValueError(f"data must not exceed {MEDIA_IMAGE_MAX_SIZE} bytes")
+        _validate_media_image_content_type(content_type)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("timeout must be a positive number")
+
+        return await self._http.request_url(
+            "PUT",
+            presigned_url,
+            data=data,
+            headers={"Content-Type": content_type, "Content-Length": str(len(data))},
+            auth=False,
+            retries=2,
+            timeout=timeout,
+        )
+
+    async def post_media_image_complete(
+        self,
+        *,
+        upload_id: str,
+        md5: str,
+    ) -> media_image.MediaImageCompleteResponse:
+        """完成素材图片上传，返回 ``qqbot-media://`` 引用与 ``image_id``。"""
+
+        _required_text(upload_id, "upload_id")
+        _validate_digest(md5, "md5", 32)
+        route = Route("POST", "/v2/media-images/complete")
+        return await self._http.request(route, json={"upload_id": upload_id, "md5": md5.lower()}, timeout=120)
+
+    async def get_media_images(self, *, cursor: Optional[str] = None) -> media_image.MediaImageListResponse:
+        """分页查询当前机器人的有效素材图片，按上传时间倒序。"""
+
+        if cursor is not None and not isinstance(cursor, str):
+            raise TypeError("cursor must be a string or None")
+        route = Route("GET", "/v2/media-images")
+        if cursor:
+            return await self._http.request(route, params={"cursor": cursor})
+        return await self._http.request(route)
+
+    async def delete_media_image(self, image_id: str) -> Any:
+        """删除一张素材图片并释放数量配额；``image_id`` 不存在时平台返回 40035008。"""
+
+        _required_text(image_id, "image_id")
+        route = Route("DELETE", "/v2/media-images/{image_id}/delete", image_id=image_id)
+        return await self._http.request(route)

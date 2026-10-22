@@ -111,5 +111,9 @@
 - `UploadCache`、`ReplyLimiter`、`chunk_text()`：可单独导入和替换默认实现。
 - 新增 Data URL/MIME/媒体类型、图片尺寸与 Markdown、目标解析、音频/FFmpeg 和格式化工具。
 - `on_message_sent` / `set_message_sent_hook()` 可收集平台返回的出站 `ref_idx`。
+- 新增素材管理入口：`upload_media_image()` / `send_markdown_image()` / `list_media_images()` /
+  `delete_media_image()`，以及底层的 `post_media_image_prepare()`、`put_media_image()`、
+  `post_media_image_complete()`。素材图片走 `/v2/media-images` 三步协议换取 `qqbot-media://` 引用，
+  与富媒体消息的 `file_info` 上传互不替代。
 
 完整签名和示例见 [docs/API.md](./docs/API.md)。

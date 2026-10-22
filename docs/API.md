@@ -90,6 +90,37 @@ bytes、base64 和本地文件达到 5 MiB 时自动使用分片协议，`force_
 `upload_part_finish` 中按实际接口要求发送 JSON 数字（接口文档示例中的 `part_index=0` 与字符串
 `block_size` 不可用）。
 
+## 素材管理
+
+素材图片（`/v2/media-images`）和上面富媒体消息用的 `file_info` 是两套协议。素材图片上传后拿到的是
+`qqbot-media://image/v1/<token>` 引用，只能用于 Markdown 消息内嵌图片，不占用文件配额；引用与机器人绑定，
+有效期滑动 90 天，每次被引用后自动顺延。
+
+```python
+# 一步到位：上传并发送一条只含图片的 Markdown 消息
+await client.send_markdown_image(target, local_path="cake.png", alt="今日甜品")
+
+# 分步使用：先拿引用，再自己拼 Markdown
+uploaded = await client.upload_media_image(data=png_bytes, file_name="cake.png")
+print(uploaded.url)       # qqbot-media://image/v1/<token>
+print(uploaded.markdown)  # ![](qqbot-media://image/v1/<token>)，含宽高时自动带上 #宽px #高px
+await client.send_markdown(target, f"出炉了\n{uploaded.markdown}")
+
+# 管理与清理
+page = await client.list_media_images()
+page = await client.list_media_images(cursor=page.get("next_cursor"))
+await client.delete_media_image(uploaded.image_id)
+```
+
+`upload_media_image()` 返回 `MediaImageUploadResult`，字段为 `image_id`、`url`、`ttl`、`preview_url`、
+`upload_id`、`file_name`、`content_type`、`size` 和 `markdown`。它内部依次调用
+`post_media_image_prepare()` → `put_media_image()` → `post_media_image_complete()`，三步也可以直接通过
+`client.api` 手动执行。
+
+约束：仅支持 `png` / `jpeg` / `gif` / `webp`，扩展名必须与 `content_type` 一致，单张不超过 10 MB，单个机器人
+最多保留 100 张有效图片。上传只接受 `bytes` 或本地文件，不支持 `url` 源——平台要求 prepare 阶段提交
+`md5` 与 `sha1`，远程 URL 无法在本地计算摘要。`preview_url` 是短时效外链，不要持久化。
+
 ## 通用 REST API
 
 ```python

@@ -1,4 +1,4 @@
-from typing import Any, NotRequired, Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
 from ..robot import Token
 
@@ -8,14 +8,17 @@ class ShardConfig(TypedDict):
     shard_count: int
 
 
-class Session(TypedDict):
+class _SessionOptionalFields(TypedDict, total=False):
+    ssl: Any
+    proxy: Any
+    reconnect_policy: Any
+    session_store: Any
+
+
+class Session(_SessionOptionalFields):
     session_id: str
     last_seq: Optional[int]
     intent: int
     token: Token
     url: str
     shards: ShardConfig
-    ssl: NotRequired[Any]
-    proxy: NotRequired[Any]
-    reconnect_policy: NotRequired[Any]
-    session_store: NotRequired[Any]

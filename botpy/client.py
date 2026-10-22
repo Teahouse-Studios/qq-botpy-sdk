@@ -23,6 +23,7 @@ from .protocol.events import normalize_inbound_message
 from .protocol.constants import DEFAULT_API_BASE_URL
 from .protocol.errors import TransportError
 from .protocol.media import ChunkedMediaUploader, ProgressCallback
+from .protocol.media_image import MediaImageUploader, MediaImageUploadResult
 from .protocol.message import (
     LARGE_MEDIA_THRESHOLD,
     MAX_MEDIA_UPLOAD_SIZE,
@@ -606,6 +607,69 @@ class Client:
         if not isinstance(raw_url, str) or not raw_url:
             raise RuntimeError("media upload response does not contain raw_url")
         return MediaUrlResult(upload=response, raw_url=raw_url, ttl=_coerce_ttl(response.get("ttl")))
+
+    async def upload_media_image(
+        self,
+        *,
+        data: Optional[bytes] = None,
+        local_path: Optional[Union[str, Path]] = None,
+        file_name: Optional[str] = None,
+        content_type: Optional[str] = None,
+        alt: Optional[str] = None,
+        timeout: float = 300,
+    ) -> MediaImageUploadResult:
+        """上传素材图片并返回 ``qqbot-media://`` 引用。
+
+        素材图片与富媒体消息的 ``file_info`` 不是同一套协议：这里只负责拿到引用，
+        通过 ``result.markdown`` 或 :meth:`send_markdown` 把图片嵌进 Markdown 消息。
+        ``data`` 与 ``local_path`` 必须二选一。
+        """
+
+        uploader = getattr(self, "_media_image_uploader", None)
+        if uploader is None:
+            uploader = MediaImageUploader(self.api, logger=_log)
+            self._media_image_uploader = uploader
+        return await uploader.upload(
+            data=data,
+            local_path=local_path,
+            file_name=file_name,
+            content_type=content_type,
+            alt=alt,
+            timeout=timeout,
+        )
+
+    async def list_media_images(self, *, cursor: Optional[str] = None) -> Mapping[str, Any]:
+        """分页查询当前机器人的有效素材图片。"""
+
+        return await self.api.get_media_images(cursor=cursor)
+
+    async def delete_media_image(self, image_id: str) -> Any:
+        """删除一张素材图片并释放配额。"""
+
+        return await self.api.delete_media_image(image_id)
+
+    async def send_markdown_image(
+        self,
+        target: ReplyTarget,
+        *,
+        data: Optional[bytes] = None,
+        local_path: Optional[Union[str, Path]] = None,
+        file_name: Optional[str] = None,
+        content_type: Optional[str] = None,
+        alt: Optional[str] = None,
+        keyboard: Optional[Mapping[str, Any]] = None,
+    ):
+        """上传素材图片并把它作为 Markdown 图片消息发出去。"""
+
+        uploaded = await Client.upload_media_image(
+            self,
+            data=data,
+            local_path=local_path,
+            file_name=file_name,
+            content_type=content_type,
+            alt=alt,
+        )
+        return await Client.send_markdown(self, target, uploaded.markdown, keyboard=keyboard)
 
     async def _upload_media(
         self,
