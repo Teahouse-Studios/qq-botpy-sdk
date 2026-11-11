@@ -59,6 +59,9 @@ HTTP 请求发出前抛出 `TransportError`；重试等待超时则保留此前�
 `send_markdown()` 的 `force_verify_image_resource=True` 会让平台校验 Markdown 内图片的转存结果：
 转存失败时消息不会发出，直接返回错误。省略时不下发该字段，保持平台默认的 `False` 行为。
 
+键盘对象或单个按钮可以设置 `small=True` 使用更小的按钮布局。SDK 发送前会将该选项转换为
+`keyboard.content.style.font_size = "small"`，并保留其他键盘样式字段。
+
 `send_text()` 自动切分超过 5000 字符的文本。单段返回一个平台响应，多段返回响应列表。C2C 和群聊携带
 `message_id` 时会执行被动回复限制；超限后自动转主动发送。常规消息 POST 中，仅这类带 `msg_id` 的
 被动回复会对不确定的传输失败重试一次；主动消息不自动重试。

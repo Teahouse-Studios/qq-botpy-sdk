@@ -29,6 +29,7 @@ from .types import (
 )
 
 from .types.media_image import MEDIA_IMAGE_CONTENT_TYPES, MEDIA_IMAGE_MAX_SIZE
+from .types.inline import normalize_keyboard
 
 
 def _bounded_list(value: Sequence[Any], name: str, maximum: int) -> List[Any]:
@@ -296,6 +297,11 @@ class BotAPI:
         """Run the Gateway guard before the first request and every HTTP retry."""
 
         await self._wait_until_message_send_ready()
+        request_json = kwargs.get("json")
+        if isinstance(request_json, Mapping) and isinstance(request_json.get("keyboard"), Mapping):
+            request_json = dict(request_json)
+            request_json["keyboard"] = normalize_keyboard(request_json["keyboard"])
+            kwargs["json"] = request_json
         if self._message_guard is not None:
             kwargs["before_attempt"] = self._message_guard
         return await self._http.request(route, **kwargs)

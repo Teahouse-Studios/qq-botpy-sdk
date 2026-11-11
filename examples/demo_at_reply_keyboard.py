@@ -36,6 +36,7 @@ def build_a_demo_keyboard() -> Keyboard:
     """
     button1 = Button(
         id="1",
+        small=True,
         render_data=RenderData(label="button", visited_label="BUTTON", style=0),
         action=Action(
             type=2,

@@ -66,6 +66,7 @@ class MarkdownPayload(TypedDict, total=False):
 class KeyboardPayload(TypedDict, total=False):
     id: str
     content: Keyboard
+    small: bool
 
 
 class _MediaOptionalFields(TypedDict, total=False):
