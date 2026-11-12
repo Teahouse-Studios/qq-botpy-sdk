@@ -240,10 +240,12 @@ class UniversalMessageTests(unittest.IsolatedAsyncioTestCase):
         await Client.send(dummy, target, markdown={"content": "# hi"})
         await Client.send(dummy, target, ark={"template_id": 23, "kv": []})
         await Client.send(dummy, target, media={"file_info": "info"})
+        await Client.send(dummy, target, card={"type": "tuwen", "content": {}})
+        await Client.send(dummy, target, input_notify={"input_type": 1, "input_second": 3})
 
         calls = dummy.api.calls
-        self.assertEqual([2, 3, 7], [call[2]["msg_type"] for call in calls])
-        self.assertEqual([1, 2, 3], [call[2]["msg_seq"] for call in calls])
+        self.assertEqual([2, 3, 7, 8, 6], [call[2]["msg_type"] for call in calls])
+        self.assertEqual([1, 2, 3, 4, None], [call[2].get("msg_seq") for call in calls])
         self.assertEqual("event", calls[0][2]["event_id"])
 
     async def test_send_extra_can_expose_new_platform_fields(self):

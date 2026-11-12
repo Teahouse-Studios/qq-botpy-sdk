@@ -23,7 +23,9 @@ class MessageType(IntEnum):
     MARKDOWN = 2
     ARK = 3
     EMBED = 4
+    INPUT_NOTIFY = 6
     MEDIA = 7
+    CARD = 8
 
 
 class MediaFileType(IntEnum):

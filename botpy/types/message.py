@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 from enum import Enum
-from typing import List, TypedDict
+from typing import List, Literal, TypedDict
 
 from .gateway import MessagePayload
-from .inline import Keyboard
+from .inline import Keyboard, KeyboardContent
 
 
 class Attachment(TypedDict):
@@ -45,9 +45,29 @@ class Ark(TypedDict):
     kv: List[ArkKv]
 
 
-class Reference(TypedDict):
+class Reference(TypedDict, total=False):
     message_id: str
     ignore_get_message_error: bool
+
+
+MessageReference = Reference
+
+
+class MessageCardContent(TypedDict, total=False):
+    title: str
+    description: str
+    url: str
+    pic_url: str
+
+
+class MessageCard(TypedDict, total=False):
+    type: Literal["tuwen"]
+    content: MessageCardContent
+
+
+class InputNotify(TypedDict, total=False):
+    input_type: Literal[1]
+    input_second: int
 
 
 class MessageMarkdownParams(TypedDict):
@@ -56,6 +76,7 @@ class MessageMarkdownParams(TypedDict):
 
 
 class MarkdownPayload(TypedDict, total=False):
+    template_id: int
     custom_template_id: str
     params: List[MessageMarkdownParams]
     content: str
@@ -65,7 +86,7 @@ class MarkdownPayload(TypedDict, total=False):
 
 class KeyboardPayload(TypedDict, total=False):
     id: str
-    content: Keyboard
+    content: KeyboardContent
     small: bool
 
 
@@ -88,6 +109,9 @@ class Message(MessagePayload):
     message_reference: Reference
     markdown: MarkdownPayload
     keyboard: KeyboardPayload
+    card: MessageCard
+    input_notify: InputNotify
+    is_wakeup: bool
 
 
 class TypesEnum(Enum):

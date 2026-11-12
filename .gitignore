@@ -151,3 +151,4 @@ temp/
 
 # generated_docs
 generated_docs/
+.DS_Store

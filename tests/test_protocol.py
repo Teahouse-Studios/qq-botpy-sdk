@@ -417,6 +417,42 @@ class ApiClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MessageTransportRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_and_c2c_messages_send_new_payload_fields(self):
+        class Http:
+            def __init__(self):
+                self.calls = []
+
+            async def request(inner_self, route, **kwargs):
+                inner_self.calls.append((route, kwargs["json"]))
+                return {"id": "message"}
+
+        card = {
+            "type": "tuwen",
+            "content": {
+                "title": "Title",
+                "description": "Description",
+                "url": "https://example.com",
+                "pic_url": "https://example.com/image.png",
+            },
+        }
+        http = Http()
+        api = BotAPI(http)
+
+        await api.post_group_message("group", msg_type=8, card=card)
+        await api.post_c2c_message(
+            "user",
+            msg_type=6,
+            input_notify={"input_type": 1, "input_second": 5},
+            is_wakeup=True,
+        )
+
+        self.assertEqual("/v2/groups/{group_openid}/messages", http.calls[0][0].path)
+        self.assertEqual(card, http.calls[0][1]["card"])
+        self.assertEqual(8, http.calls[0][1]["msg_type"])
+        self.assertEqual(6, http.calls[1][1]["msg_type"])
+        self.assertEqual({"input_type": 1, "input_second": 5}, http.calls[1][1]["input_notify"])
+        self.assertTrue(http.calls[1][1]["is_wakeup"])
+
     async def test_http_retry_waits_for_gateway_to_resume(self):
         retry_started = asyncio.Event()
         client = Client(Intents.none(), bot_log=None, gateway_send_timeout=1)

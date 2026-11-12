@@ -26,7 +26,7 @@ async def send_template_keyboard(api: BotAPI, message: Message):
 
 async def send_self_defined_keyboard(api: BotAPI, message: Message):
     markdown = MarkdownPayload(content="# 标题 \n## 简介 \n内容")
-    keyboard = KeyboardPayload(content=build_a_demo_keyboard())
+    keyboard = KeyboardPayload(content=build_a_demo_keyboard()["content"])
     await api.post_keyboard_message(message.channel_id, markdown=markdown, keyboard=keyboard)
 
 

@@ -81,26 +81,26 @@ class InlineKeyboardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(original, keyboard)
 
-    async def test_keyboard_payload_wrapper_accepts_small_option(self):
+    async def test_post_keyboard_message_uses_official_keyboard_shape(self):
         http = RecordingHttp()
         api = BotAPI(http)
-        keyboard = {"small": True, "content": {"content": {"rows": []}}}
+        keyboard = {"small": True, "content": {"rows": []}}
 
         await api.post_keyboard_message("channel", keyboard=keyboard)
 
         self.assertEqual(
-            {"small": True, "content": {"content": {"rows": []}}},
+            {"small": True, "content": {"rows": []}},
             keyboard,
         )
         self.assertEqual(
             {
-                "content": {
+                "keyboard": {
                     "content": {
                         "rows": [],
                         "style": {"font_size": "small"},
                     }
                 },
+                "markdown": None,
             },
-            http.calls[-1][1]["json"]["keyboard"],
+            http.calls[-1][1]["json"],
         )
-

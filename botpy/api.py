@@ -2273,6 +2273,7 @@ class BotAPI:
         event_id: str = None,
         markdown: message.MarkdownPayload = None,
         keyboard: message.KeyboardPayload = None,
+        card: message.MessageCard = None,
         **extra,
     ) -> message.Message:
         """
@@ -2286,7 +2287,7 @@ class BotAPI:
 
         Args:
           group_openid (str): 您要将消息发送到的群的 ID。
-          msg_type (int): 消息类型：0 是文本，1 图文混排，2 是 markdown，3 ark，4 embed，7 media 富媒体
+          msg_type (int): 消息类型：0 是文本，2 是 Markdown，7 是富媒体，8 是图文卡片
           content (str): 消息的文本内容。
           embed (message.Embed): embed 消息，一种特殊的 ark
           ark (message.Ark): ark 模版消息
@@ -2297,6 +2298,7 @@ class BotAPI:
           event_id (str): 您要回复的消息的事件 ID。
           markdown (message.MarkdownPayload): markdown 消息
           keyboard (message.KeyboardPayload): keyboard 消息
+          card (message.MessageCard): 图文卡片消息，msg_type=8 时使用
 
         Returns:
           message.Message: 一个消息字典对象。
@@ -2313,6 +2315,7 @@ class BotAPI:
             "event_id": event_id,
             "markdown": markdown,
             "keyboard": keyboard,
+            "card": card,
         }
         payload.update(extra)
         payload = {key: value for key, value in payload.items() if value is not None}
@@ -2338,6 +2341,9 @@ class BotAPI:
         event_id: str = None,
         markdown: message.MarkdownPayload = None,
         keyboard: message.KeyboardPayload = None,
+        card: message.MessageCard = None,
+        input_notify: message.InputNotify = None,
+        is_wakeup: bool = None,
         **extra,
     ) -> message.Message:
         """
@@ -2351,7 +2357,7 @@ class BotAPI:
 
         Args:
           openid (str): 您要将消息发送到的用户的 ID。
-          msg_type (int): 消息类型：0 是文本，1 图文混排，2 是 markdown，3 ark，4 embed，7 media 富媒体
+          msg_type (int): 消息类型：0 是文本，2 是 Markdown，6 是输入中状态，7 是富媒体，8 是图文卡片
           content (str): 消息的文本内容。
           embed (message.Embed): embed 消息，一种特殊的 ark
           ark (message.Ark): ark 模版消息
@@ -2362,6 +2368,9 @@ class BotAPI:
           event_id (str): 您要回复的消息的事件 ID。
           markdown (message.MarkdownPayload): markdown 消息
           keyboard (message.KeyboardPayload): keyboard 消息
+          card (message.MessageCard): 图文卡片消息，msg_type=8 时使用
+          input_notify (message.InputNotify): 输入中状态，msg_type=6 时使用
+          is_wakeup (bool): 是否为互动召回消息
 
         Returns:
           message.Message: 一个消息字典对象。
@@ -2378,6 +2387,9 @@ class BotAPI:
             "event_id": event_id,
             "markdown": markdown,
             "keyboard": keyboard,
+            "card": card,
+            "input_notify": input_notify,
+            "is_wakeup": is_wakeup,
         }
         payload.update(extra)
         payload = {key: value for key, value in payload.items() if value is not None}

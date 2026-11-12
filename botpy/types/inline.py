@@ -3,37 +3,46 @@ from copy import deepcopy
 from typing import Any, List, Literal, Optional, TypedDict
 
 
-class Permission(TypedDict):
+class Permission(TypedDict, total=False):
     type: int
     specify_role_ids: List[str]
     specify_user_ids: List[str]
 
 
-class RenderData(TypedDict):
+class RenderData(TypedDict, total=False):
     label: str
     visited_label: str
     style: int
 
 
-class Action(TypedDict):
+class Modal(TypedDict, total=False):
+    content: str
+    confirm_text: str
+    cancel_text: str
+
+
+class Action(TypedDict, total=False):
     type: int
     permission: Permission
     click_limit: int
     data: str
     at_bot_show_channel_list: bool
+    unsupport_tips: str
+    enter: bool
+    reply: bool
+    anchor: int
+    modal: Modal
 
 
-class _SmallButtonOptions(TypedDict, total=False):
+class Button(TypedDict, total=False):
     small: bool
-
-
-class Button(_SmallButtonOptions):
     id: str
     render_data: RenderData
     action: Action
+    group_id: str
 
 
-class KeyboardRow(TypedDict):
+class KeyboardRow(TypedDict, total=False):
     buttons: List[Button]
 
 
@@ -45,12 +54,14 @@ class _KeyboardContentOptions(TypedDict, total=False):
     style: KeyboardStyle
 
 
-class KeyboardContent(_KeyboardContentOptions):
+class KeyboardContent(_KeyboardContentOptions, total=False):
     rows: List[KeyboardRow]
 
 
-class Keyboard(_SmallButtonOptions):
+class Keyboard(TypedDict, total=False):
+    id: str
     content: KeyboardContent
+    small: bool
 
 
 _SMALL_BUTTON_NESTED_KEYS = ("data", "buttons", "button", "content", "rows")

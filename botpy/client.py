@@ -385,9 +385,12 @@ class Client:
         media: Optional[Mapping[str, Any]] = None,
         keyboard: Optional[Mapping[str, Any]] = None,
         message_reference: Optional[Mapping[str, Any]] = None,
+        card: Optional[Mapping[str, Any]] = None,
+        input_notify: Optional[Mapping[str, Any]] = None,
+        is_wakeup: Optional[bool] = None,
         extra: Optional[Mapping[str, Any]] = None,
     ):
-        """统一发送文本、Markdown、Ark、Embed、媒体和键盘消息。
+        """统一发送文本、Markdown、Ark、Embed、媒体、卡片和键盘消息。
 
         C2C/群聊会自动推断 ``msg_type`` 并维护同一被动回复的 ``msg_seq``；
         频道和频道私信接口没有 ``msg_type`` 字段，会按具体消息字段直接发送。
@@ -407,6 +410,9 @@ class Client:
             "media": media,
             "keyboard": keyboard,
             "message_reference": message_reference,
+            "card": card,
+            "input_notify": input_notify,
+            "is_wakeup": is_wakeup,
             "msg_id": target.message_id,
             "event_id": target.event_id,
         }
@@ -492,6 +498,10 @@ class Client:
             return MessageType.ARK
         if payload.get("embed") is not None:
             return MessageType.EMBED
+        if payload.get("card") is not None:
+            return MessageType.CARD
+        if payload.get("input_notify") is not None:
+            return MessageType.INPUT_NOTIFY
         if payload.get("media") is not None:
             return MessageType.MEDIA
         return MessageType.TEXT
@@ -558,7 +568,7 @@ class Client:
 
         if target.scope != "c2c":
             raise ValueError("wakeup messages are only supported for c2c targets")
-        return await Client.send(self, target, content=content, extra={"is_wakeup": True})
+        return await Client.send(self, target, content=content, is_wakeup=True)
 
     async def recall_message(self, target: ReplyTarget, message_id: str, *, hidetip: bool = False):
         """按目标类型撤回消息；频道私信当前没有已确认的撤回协议。"""
