@@ -198,7 +198,7 @@ class BaseMessage:
         "msg_seq",
         "timestamp",
         "event_id",
-        "message_scene"
+        "message_scene",
     )
 
     def __init__(self, api: BotAPI, event_id, data: gateway.MessagePayload):
@@ -241,12 +241,14 @@ class GroupMessage(BaseMessage):
     __slots__ = (
         "author",
         "group_openid",
+        "union_group_openid",
     )
 
     def __init__(self, api: BotAPI, event_id, data: gateway.MessagePayload):
         super().__init__(api, event_id, data)
         self.author = self._User(data.get("author", {}))
         self.group_openid = data.get("group_openid", None)
+        self.union_group_openid = data.get("union_group_openid", None)
 
     def __repr__(self):
         slots = self.__slots__ + super().__slots__
@@ -255,16 +257,21 @@ class GroupMessage(BaseMessage):
     class _User:
         def __init__(self, data):
             self.id = data.get("id", None)
+            self.username = data.get("username", None)
+            self.avatar = data.get("avatar", None)
+            self.bot = data.get("bot", None)
+            self.union_openid = data.get("union_openid", None)
             self.member_openid = data.get("member_openid", None)
             self.member_role = data.get("member_role", None)
-            self.username = data.get("username", None)
+            self.member_nickname = data.get("member_nickname", None)
 
         def __repr__(self):
             return str(self.__dict__)
 
     async def reply(self, **kwargs):
         return await self._api.post_group_message(group_openid=self.group_openid, msg_id=self.id, **kwargs)
-    
+
+
 class C2CMessage(BaseMessage):
     __slots__ = ("author",)
 
@@ -279,6 +286,11 @@ class C2CMessage(BaseMessage):
 
     class _User:
         def __init__(self, data):
+            self.id = data.get("id", None)
+            self.username = data.get("username", None)
+            self.avatar = data.get("avatar", None)
+            self.bot = data.get("bot", None)
+            self.union_openid = data.get("union_openid", None)
             self.user_openid = data.get("user_openid", None)
 
         def __repr__(self):

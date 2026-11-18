@@ -191,6 +191,8 @@ DEFAULT_ROUTE_RULES: Dict[str, RouteRule] = {
     "PATCH /channels/{}": RouteRule((RateLimitBudget(50, 1.0),)),  # 50 QPS
     "DELETE /channels/{}": RouteRule((RateLimitBudget(50, 1.0),)),  # 50 QPS
     "PUT /interactions/{}": RouteRule((RateLimitBudget(50, 1.0),)),  # 50 QPS
+    # -- 用户信息 -----------------------------------------------------------
+    "GET /v2/users/{}/info": RouteRule((RateLimitBudget(10, 1.0),)),  # 10 QPS
     # -- 消息 ---------------------------------------------------------------
     # 100 QPS（接口级）；被动回复 5 分钟 / 5 次；主动消息另有 Bot 与单群配额，
     # 具体档位由 ``certification`` 决定，见 PROACTIVE_BOT_BUDGETS。

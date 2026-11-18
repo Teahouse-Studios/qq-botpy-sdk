@@ -143,8 +143,6 @@ SDK 在构造整流器时会打一条 INFO 日志说明当前档位，并在已�
 
 ## 文档显式标注的接口限制
 
-下表由 `generated_docs/extract_rate_limits.py` 从本地文档副本提取，并与
-`botpy.protocol.ratelimit.DEFAULT_ROUTE_RULES` 逐条比对（当前 47/47 一致）。
 
 | 接口 | 文档原文 | 整流参数 |
 | --- | --- | --- |
@@ -190,6 +188,7 @@ SDK 在构造整流器时会打一条 INFO 日志说明当前档位，并在已�
 | `PUT /v2/panels/{}` | 10 QPM | 10/60s |
 | `PUT /v2/panels/{}/target` | 60 QPM | 60/60s |
 | `POST /v2/users/{}/files` | 50 QPS | 50/1s |
+| `GET /v2/users/{}/info` | 10 QPS | 10/1s |
 | `POST /v2/users/{}/messages` | 100 QPS，包括主动、被动等所有消息类型 | 100/1s |
 | `DELETE /v2/users/{}/messages/{}` | 10 QPS | 10/1s |
 | `POST /v2/users/{}/stream_messages` | 50 QPS | 50/1s |
@@ -197,7 +196,7 @@ SDK 在构造整流器时会打一条 INFO 日志说明当前档位，并在已�
 | `POST /v2/users/{}/upload_prepare` | 10 QPS | 10/1s |
 ## 未显式标注限制的接口
 
-SDK 声明了 88 条 REST 路由，其中 42 条能在文档中找到显式限制，其余按以下方式整流：
+SDK 声明了 89 条 REST 路由，其中 43 条能在文档中找到显式限制，其余按以下方式整流：
 
 | 情况 | 处理 |
 | --- | --- |

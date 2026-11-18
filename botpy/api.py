@@ -1155,6 +1155,21 @@ class BotAPI:
         route = Route("GET", "/users/@me")
         return await self._http.request(route)
 
+    async def get_user_info(self, user_openid: str) -> user.UserInfo:
+        """获取指定用户的基本信息。
+
+        Args:
+          user_openid (str): 用户 OpenID。
+
+        Returns:
+          用户基本信息。``union_openid`` 仅在用户绑定第三方应用时返回，
+          ``allow_proactive_msg`` 表示用户是否接受主动消息。
+        """
+
+        _required_text(user_openid, "user_openid")
+        route = Route("GET", "/v2/users/{user_openid}/info", user_openid=user_openid)
+        return await self._http.request(route)
+
     async def me_guilds(self, guild_id: str = None, limit: int = 100, desc: bool = False) -> List[guild.GuildPayload]:
         """
         它返回当前用户已加入的 Guild 对象列表。

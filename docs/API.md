@@ -207,6 +207,16 @@ POST/PATCH 默认不重试。只有确认接口具有幂等语义时，才传 `r
 `TransportError` 提供 `method`、`url`、原始 `cause` 和 `attempts` 便于诊断；`attempts=0` 明确表示
 HTTP 请求尚未发出。
 
+## 用户信息
+
+```python
+info = await client.api.get_user_info(user_openid)
+print(info["username"], info["avatar"], info["allow_proactive_msg"])
+```
+
+`get_user_info()` 封装 `GET /v2/users/{user_openid}/info`，频率限制为 10 QPS。`union_openid` 仅在用户绑定
+第三方应用时返回；`allow_proactive_msg` 表示用户是否接受主动消息。
+
 ## 群管理
 
 ```python

@@ -33,12 +33,13 @@
 
 ```python
 info = await client.api.get_group_info(group_openid)
-print(info["group_name"], info["group_member_num"], info["group_tags"])
+print(info["group_name"], info["group_member_num"], info["group_tags"], info.get("union_group_openid"))
 
 state = await client.api.get_group_bot_state(group_openid)
 print(state["member_openid"], state["joined_at"], state["member_role"])
 ```
 
+`union_group_openid` 是群在第三方应用间的统一标识，仅在群绑定第三方应用时返回。
 `joined_at` 为 RFC3339 时间字符串。`recv_msg_setting` 可能为 `all`、`only_mention`
 或 `mention_and_context`；`member_role` 可能为 `member`、`owner` 或 `admin`。
 
@@ -192,7 +193,7 @@ from botpy.manage import GroupJoinRequestEvent, GroupMemberEvent
 
 class MyClient(botpy.Client):
     async def on_group_member_add(self, event: GroupMemberEvent):
-        print(event.group_openid, event.member_openid, event.user_openid)
+        print(event.group_openid, event.member_openid, event.user_openid, event.union_group_openid)
 
     async def on_group_join_request(self, event: GroupJoinRequestEvent):
         if event.auto_approved:
@@ -200,6 +201,10 @@ class MyClient(botpy.Client):
             return
         await event.approve()
 ```
+
+`GROUP_ADD_ROBOT`、`GROUP_DEL_ROBOT`、`GROUP_MEMBER_ADD`、`GROUP_MEMBER_REMOVE` 事件会在事件对象上提供
+`union_group_openid`（群绑定第三方应用时有效）。`GROUP_JOIN_REQUEST`、`GROUP_MSG_RECEIVE` 和
+`GROUP_MSG_REJECT` 事件不包含该字段。
 
 `GroupJoinRequestEvent.approve()` 和 `decline()` 会自动携带事件中的群 OpenID、成员 OpenID 与申请 ID。
 例如：`await event.decline(reject_reason="未通过验证", add_to_member_blacklist=True)`。

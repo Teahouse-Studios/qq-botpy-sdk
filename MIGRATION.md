@@ -106,6 +106,11 @@
 
 - `client.api.get/post/put/patch/delete/request()`：调用尚未封装的 REST API。
 - `await client.api.get_token()`：获取当前有效 access token。
+- `await client.api.get_user_info(user_openid)`：获取用户基本信息（`username`、`avatar`、`allow_proactive_msg`，
+  绑定第三方应用时另有 `union_openid`）。
+- 入站消息新增作者字段：`GroupMessage.author.member_nickname` / `avatar` / `union_openid` / `bot`，
+  `C2CMessage.author.username` / `avatar` / `union_openid` / `bot`；`GroupMessage` 与群管理/群成员事件新增
+  `union_group_openid`。
 - `await client.acknowledge_interaction(...)` 和 `Interaction.acknowledge(...)`：高层 Interaction ACK。
 - `on_interaction_context(context)`：收到包含 `client`、原始事件、`state` 和接收时间的统一上下文。
 - `UploadCache`、`ReplyLimiter`、`chunk_text()`：可单独导入和替换默认实现。

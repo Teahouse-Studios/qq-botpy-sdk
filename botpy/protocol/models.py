@@ -67,3 +67,5 @@ class InboundMessage:
     timestamp: Optional[str] = None
     raw: Mapping[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    author_avatar: Optional[str] = None
+    author_union_openid: Optional[str] = None

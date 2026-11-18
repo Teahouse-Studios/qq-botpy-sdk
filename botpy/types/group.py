@@ -13,6 +13,7 @@ class GroupInfo(TypedDict):
     group_class_text: str
     group_tags: List[str]
     group_member_num: int
+    union_group_openid: str
 
 
 class GroupBotState(TypedDict):

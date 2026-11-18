@@ -78,7 +78,9 @@ def normalize_inbound_message(event: RawEvent) -> Optional[InboundMessage]:
         ),
         event_type=event_type,
         author_id=author_id,
-        author_name=_optional_string(author.get("username")),
+        author_name=_optional_string(author.get("member_nickname")) or _optional_string(author.get("username")),
+        author_avatar=_optional_string(author.get("avatar")),
+        author_union_openid=_optional_string(author.get("union_openid")),
         author_is_bot=author.get("bot") if isinstance(author.get("bot"), bool) else None,
         attachments=_parse_attachments(data.get("attachments")),
         event_id=event.event_id,
@@ -126,6 +128,7 @@ def _message_metadata(data: Mapping[str, Any]) -> Dict[str, Any]:
         "seq",
         "seq_in_channel",
         "src_guild_id",
+        "union_group_openid",
     )
     return {key: data[key] for key in keys if data.get(key) is not None}
 

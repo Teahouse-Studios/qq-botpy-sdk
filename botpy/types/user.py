@@ -11,6 +11,13 @@ class User(TypedDict):
     union_user_account: str
 
 
+class UserInfo(TypedDict, total=False):
+    union_openid: str
+    username: str
+    avatar: str
+    allow_proactive_msg: bool
+
+
 class Member(TypedDict):
     user: User
     nick: str

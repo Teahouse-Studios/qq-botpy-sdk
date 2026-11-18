@@ -9,6 +9,7 @@ class GroupManageEvent:
         "timestamp",
         "group_openid",
         "op_member_openid",
+        "union_group_openid",
     )
 
     def __init__(self, api: BotAPI, event_id, data: Dict):
@@ -17,6 +18,7 @@ class GroupManageEvent:
         self.timestamp = data.get("timestamp", None)
         self.group_openid = data.get("group_openid", None)
         self.op_member_openid = data.get("op_member_openid", None)
+        self.union_group_openid = data.get("union_group_openid", None)
 
     def __repr__(self):
         return str({items: str(getattr(self, items)) for items in self.__slots__ if not items.startswith("_")})
@@ -48,6 +50,7 @@ class GroupMemberEvent:
         "group_openid",
         "member_openid",
         "user_openid",
+        "union_group_openid",
     )
 
     def __init__(self, api: BotAPI, event_id, data: Dict):
@@ -57,6 +60,7 @@ class GroupMemberEvent:
         self.group_openid = data.get("group_openid", None)
         self.member_openid = data.get("member_openid", None)
         self.user_openid = data.get("user_openid", None)
+        self.union_group_openid = data.get("union_group_openid", None)
 
     def __repr__(self):
         return str({items: str(getattr(self, items)) for items in self.__slots__ if not items.startswith("_")})
